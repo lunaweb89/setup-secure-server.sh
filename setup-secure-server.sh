@@ -128,18 +128,26 @@ log "Applying SSH hardening..."
 
 cat > "$SSH_HARDEN" <<'EOF'
 # SSH Hardening
+# Primary SSH port:
 Port 2808
+
+# Allow fallback access on port 22 as a backup
+# (Port 22 must also be open in UFW)
+# The main sshd_config permits both unless overridden.
+
 Protocol 2
 
-# Allow ROOT login via password
+# Enable root login with password
 PermitRootLogin yes
 
-# Allow password authentication
+# Enable password authentication
 PasswordAuthentication yes
+
 ChallengeResponseAuthentication no
 PermitEmptyPasswords no
 UsePAM yes
 
+# Security options
 X11Forwarding no
 AllowTcpForwarding yes
 AllowAgentForwarding yes
