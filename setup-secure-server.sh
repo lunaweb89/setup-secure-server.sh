@@ -128,10 +128,13 @@ log "Applying SSH hardening..."
 
 cat > "$SSH_HARDEN" <<'EOF'
 # SSH Hardening
-Port 22
+Port 2808
 Protocol 2
 
-PermitRootLogin prohibit-password
+# Allow ROOT login via password
+PermitRootLogin yes
+
+# Allow password authentication
 PasswordAuthentication yes
 ChallengeResponseAuthentication no
 PermitEmptyPasswords no
@@ -158,6 +161,7 @@ if command -v sshd >/dev/null 2>&1; then
 else
   echo "[-] sshd binary not found; please verify openssh-server installation." >&2
 fi
+
 
 # ----------------- Fail2Ban ----------------- #
 
@@ -186,16 +190,25 @@ systemctl restart fail2ban >/dev/null 2>&1 || true
 
 log "Configuring UFW firewall..."
 
-ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1
-ufw limit OpenSSH >/dev/null 2>&1 || true
+# Allow new SSH port
+ufw allow 2808/tcp >/dev/null 2>&1 || true
+ufw limit 2808/tcp >/dev/null 2>&1 || true
+
+# Remove default SSH rule if it exists (optional but clean)
+ufw delete allow 22/tcp >/dev/null 2>&1 || true
+ufw delete limit 22/tcp >/dev/null 2>&1 || true
+
+# Allow web traffic
 ufw allow 80/tcp >/dev/null 2>&1 || true
 ufw allow 443/tcp >/dev/null 2>&1 || true
 
+# Default policies
 ufw default deny incoming >/dev/null 2>&1 || true
 ufw default allow outgoing >/dev/null 2>&1 || true
 
 log "Enabling firewall..."
 ufw --force enable >/dev/null 2>&1 || true
+
 
 # ----------------- ClamAV ----------------- #
 
