@@ -32,7 +32,10 @@ require_root() {
 
 backup() {
     local f="$1"
-    [[ -f "$f" ]] && cp "$f" "$f.bak.$(date +%s)" && log "Backup saved: $f.bak.*"
+    if [[ -f "$f" ]]; then
+        cp "$f" "$f.bak.$(date +%s)"
+        log "Backup saved: $f.bak.*"
+    fi
 }
 
 get_codename() {
@@ -40,7 +43,7 @@ get_codename() {
         lsb_release -sc
     else
         # shellcheck disable=SC1091
-        source /etc/os-release
+        . /etc/os-release
         echo "${VERSION_CODENAME:-}"
     fi
 }
@@ -97,7 +100,7 @@ Unattended-Upgrade::Automatic-Reboot-Time "03:00";
 Unattended-Upgrade::MailOnlyOnError "true";
 EOF
 
-cat > "$AU" <<EOF
+cat > "$AU" <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
@@ -253,7 +256,8 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Weekly malware scan every Sunday at 03:30
-30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home,/var/www 1 >> /var/log/weekly-malware-scan.log 2>&1
+# Scans all sites/data under /home (CyberPanel layout)
+30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
 EOF
 
 chmod 644 "$CRON_MALWARE"
@@ -276,10 +280,10 @@ log " - ClamAV + clamav-daemon (with freshclam auto-updates)"
 log " - Maldet (Linux Malware Detect) integrated with ClamAV"
 log " - Weekly malware scan cron: /etc/cron.d/weekly-malware-scan"
 log ""
-log "Scan log:   /var/log/weekly-malware-scan.log"
+log "Scan log: /var/log/weekly-malware-scan.log"
 log "Update log: /var/log/auto-security-updates.log"
 log ""
 log "Optional next step: After adding your SSH key,"
 log "  edit /etc/ssh/sshd_config.d/99-hardening.conf and set:"
 log "      PasswordAuthentication no"
-log "  then: systemctl reload ssh"
+log "  then: systemctl relo
