@@ -13,7 +13,7 @@
 #   - Run weekly malware scans via cron
 #
 # Designed to be executed directly from GitHub:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/setup-secure-server.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server.sh/main/setup-secure-server.sh)
 #
 # Safe to run once on a fresh Ubuntu server.
 
@@ -175,13 +175,13 @@ backend = systemd
 EOF
 
 systemctl enable fail2ban >/dev/null 2>&1 || true
-systemctl restart fail2ban || true
+systemctl restart fail2ban >/dev/null 2>&1 || true
 
 # ----------------- UFW Firewall ----------------- #
 
 log "Configuring UFW firewall..."
 
-ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp
+ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1
 ufw limit OpenSSH >/dev/null 2>&1 || true
 ufw allow 80/tcp >/dev/null 2>&1 || true
 ufw allow 443/tcp >/dev/null 2>&1 || true
@@ -213,27 +213,30 @@ log "Installing Linux Malware Detect (Maldet)..."
 TMP_DIR="/tmp/maldet-install"
 mkdir -p "$TMP_DIR"
 
-# Download latest Maldet
-# This pulls the latest stable tarball from rfxn.com (common Maldet source)
 MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
 MALDET_TGZ="${TMP_DIR}/maldetect-current.tar.gz"
 
-wget -q -O "$MALDET_TGZ" "$MALDET_URL"
+wget -q -O "$MALDET_TGZ" "$MALDET_URL" || {
+    echo "[-] Failed to download Maldet from $MALDET_URL" >&2
+}
 
-tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
-MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
+if [[ -f "$MALDET_TGZ" ]]; then
+    tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
+    MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
 
-if [[ -z "$MALDET_SRC_DIR" ]]; then
-    echo "[-] Could not locate Maldet source directory after extraction."
+    if [[ -n "$MALDET_SRC_DIR" ]]; then
+        (cd "$MALDET_SRC_DIR" && bash install.sh) || echo "[-] Maldet install script failed." >&2
+    else
+        echo "[-] Could not locate Maldet source directory after extraction." >&2
+    fi
 else
-    (cd "$MALDET_SRC_DIR" && bash install.sh)
+    echo "[-] Maldet tarball not found, skipping Maldet install." >&2
 fi
 
 # Configure Maldet to use ClamAV engine if available
 MALDET_CONF="/usr/local/maldetect/conf.maldet"
 if [[ -f "$MALDET_CONF" ]]; then
     backup "$MALDET_CONF"
-    # Enable ClamAV (scan_clamscan=1)
     sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF" || true
     sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF" || true
     log "Configured Maldet to use ClamAV engine."
@@ -250,7 +253,7 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Weekly malware scan every Sunday at 03:30
-30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home, /var/www 1 >> /var/log/weekly-malware-scan.log 2>&1
+30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home,/var/www 1 >> /var/log/weekly-malware-scan.log 2>&1
 EOF
 
 chmod 644 "$CRON_MALWARE"
@@ -273,7 +276,7 @@ log " - ClamAV + clamav-daemon (with freshclam auto-updates)"
 log " - Maldet (Linux Malware Detect) integrated with ClamAV"
 log " - Weekly malware scan cron: /etc/cron.d/weekly-malware-scan"
 log ""
-log "Scan log: /var/log/weekly-malware-scan.log"
+log "Scan log:   /var/log/weekly-malware-scan.log"
 log "Update log: /var/log/auto-security-updates.log"
 log ""
 log "Optional next step: After adding your SSH key,"
