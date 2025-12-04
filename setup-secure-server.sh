@@ -10,12 +10,10 @@
 #   - Install + configure fail2ban
 #   - Configure + enable UFW firewall
 #   - Install ClamAV + Maldet (Linux Malware Detect)
-#   - Run weekly malware scans via cron
+#   - Run weekly malware scans via cron on /home
 #
-# Designed to be executed directly from GitHub:
+# Run directly from GitHub:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server.sh/main/setup-secure-server.sh)
-#
-# Safe to run once on a fresh Ubuntu server.
 
 set -euo pipefail
 
@@ -24,28 +22,32 @@ set -euo pipefail
 log() { echo "[+] $*"; }
 
 require_root() {
-    if [[ "$EUID" -ne 0 ]]; then
-        echo "[-] ERROR: This script must run as root (sudo)." >&2
-        exit 1
-    fi
+  if [[ "$EUID" -ne 0 ]]; then
+    echo "[-] ERROR: This script must run as root (sudo)." >&2
+    exit 1
+  fi
 }
 
 backup() {
-    local f="$1"
-    if [[ -f "$f" ]]; then
-        cp "$f" "$f.bak.$(date +%s)"
-        log "Backup saved: $f.bak.*"
-    fi
+  local f="$1"
+  if [[ -f "$f" ]]; then
+    # Store backups under /root/config-backups to avoid APT warnings
+    local rel="${f#/}"
+    local dir="/root/config-backups/$(dirname "$rel")"
+    mkdir -p "$dir"
+    cp "$f" "$dir/$(basename "$f").bak.$(date +%s)"
+    log "Backup saved: $dir/$(basename "$f").bak.*"
+  fi
 }
 
 get_codename() {
-    if command -v lsb_release >/dev/null 2>&1; then
-        lsb_release -sc
-    else
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        echo "${VERSION_CODENAME:-}"
-    fi
+  if command -v lsb_release >/dev/null 2>&1; then
+    lsb_release -sc
+  else
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    echo "${VERSION_CODENAME:-}"
+  fi
 }
 
 # ----------------- Start ----------------- #
@@ -58,16 +60,16 @@ apt-get update -qq
 
 log "Installing required base packages (may already be installed)..."
 apt-get install -y -qq \
-    lsb-release \
-    ca-certificates \
-    openssh-server \
-    cron \
-    ufw \
-    fail2ban \
-    unattended-upgrades \
-    curl \
-    wget \
-    tar
+  lsb-release \
+  ca-certificates \
+  openssh-server \
+  cron \
+  ufw \
+  fail2ban \
+  unattended-upgrades \
+  curl \
+  wget \
+  tar
 
 log "Ensuring SSH service is running..."
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
@@ -75,8 +77,8 @@ systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 
 
 CODENAME="$(get_codename)"
 if [[ -z "$CODENAME" ]]; then
-    echo "[-] Unable to detect Ubuntu codename."
-    exit 1
+  echo "[-] Unable to detect Ubuntu codename." >&2
+  exit 1
 fi
 log "Ubuntu codename detected: $CODENAME"
 
@@ -93,7 +95,7 @@ log "Configuring unattended security upgrades..."
 
 cat > "$UU" <<EOF
 Unattended-Upgrade::Origins-Pattern {
-    "origin=Ubuntu,codename=${CODENAME},label=Ubuntu-Security";
+  "origin=Ubuntu,codename=${CODENAME},label=Ubuntu-Security";
 };
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "03:00";
@@ -147,14 +149,14 @@ EOF
 
 log "Testing SSH configuration..."
 if command -v sshd >/dev/null 2>&1; then
-    if sshd -t; then
-        systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
-        log "SSHD reloaded with hardened config."
-    else
-        echo "[-] SSH config test failed — not reloading."
-    fi
+  if sshd -t; then
+    systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
+    log "SSHD reloaded with hardened config."
+  else
+    echo "[-] SSH config test failed; not reloading." >&2
+  fi
 else
-    echo "[-] sshd binary not found. Please verify openssh-server installation." >&2
+  echo "[-] sshd binary not found; please verify openssh-server installation." >&2
 fi
 
 # ----------------- Fail2Ban ----------------- #
@@ -195,7 +197,7 @@ ufw default allow outgoing >/dev/null 2>&1 || true
 log "Enabling firewall..."
 ufw --force enable >/dev/null 2>&1 || true
 
-# ----------------- ClamAV Installation ----------------- #
+# ----------------- ClamAV ----------------- #
 
 log "Installing ClamAV antivirus..."
 apt-get install -y -qq clamav clamav-daemon
@@ -219,30 +221,26 @@ mkdir -p "$TMP_DIR"
 MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
 MALDET_TGZ="${TMP_DIR}/maldetect-current.tar.gz"
 
-wget -q -O "$MALDET_TGZ" "$MALDET_URL" || {
-    echo "[-] Failed to download Maldet from $MALDET_URL" >&2
-}
-
-if [[ -f "$MALDET_TGZ" ]]; then
-    tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
-    MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
-
-    if [[ -n "$MALDET_SRC_DIR" ]]; then
-        (cd "$MALDET_SRC_DIR" && bash install.sh) || echo "[-] Maldet install script failed." >&2
-    else
-        echo "[-] Could not locate Maldet source directory after extraction." >&2
-    fi
+if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
+  tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
+  MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
+  if [[ -n "$MALDET_SRC_DIR" ]]; then
+    (cd "$MALDET_SRC_DIR" && bash install.sh) || echo "[-] Maldet install script failed." >&2
+  else
+    echo "[-] Could not locate Maldet source directory after extraction." >&2
+  fi
 else
-    echo "[-] Maldet tarball not found, skipping Maldet install." >&2
+  echo "[-] Failed to download Maldet from $MALDET_URL" >&2
 fi
 
-# Configure Maldet to use ClamAV engine if available
 MALDET_CONF="/usr/local/maldetect/conf.maldet"
 if [[ -f "$MALDET_CONF" ]]; then
-    backup "$MALDET_CONF"
-    sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF" || true
-    sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF" || true
-    log "Configured Maldet to use ClamAV engine."
+  backup "$MALDET_CONF"
+  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF" || true
+  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF" || true
+  log "Configured Maldet to use ClamAV engine."
+else
+  echo "[-] Maldet config not found at $MALDET_CONF" >&2
 fi
 
 # ----------------- Weekly Malware Scan via Cron ----------------- #
@@ -267,23 +265,5 @@ chmod 644 "$CRON_MALWARE"
 log "Running initial security upgrade (unattended-upgrade)..."
 unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1 || true
 
-# ----------------- DONE ----------------- #
-
-log "SECURE SERVER + ANTIVIRUS SETUP COMPLETE!"
-log ""
-log "Installed & enabled:"
-log " - Security-only automatic updates (unattended-upgrades)"
-log " - SSH hardening"
-log " - Fail2Ban (SSH protection)"
-log " - UFW firewall (SSH/HTTP/HTTPS allowed)"
-log " - ClamAV + clamav-daemon (with freshclam auto-updates)"
-log " - Maldet (Linux Malware Detect) integrated with ClamAV"
-log " - Weekly malware scan cron: /etc/cron.d/weekly-malware-scan"
-log ""
-log "Scan log: /var/log/weekly-malware-scan.log"
-log "Update log: /var/log/auto-security-updates.log"
-log ""
-log "Optional next step: After adding your SSH key,"
-log "  edit /etc/ssh/sshd_config.d/99-hardening.conf and set:"
-log "      PasswordAuthentication no"
-log "  then: systemctl relo
+log "Secure server + antivirus setup complete."
+log "Security auto-updates enabled; firewall, fail2ban, ClamAV, Maldet all configured."
