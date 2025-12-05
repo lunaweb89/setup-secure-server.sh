@@ -128,13 +128,10 @@ log "Applying SSH hardening..."
 
 cat > "$SSH_HARDEN" <<'EOF'
 # SSH Hardening
-# Primary SSH port:
+
+# Listen on BOTH ports:
+Port 22
 Port 2808
-
-# Allow fallback access on port 22 as a backup
-# (Port 22 must also be open in UFW)
-# The main sshd_config permits both unless overridden.
-
 Protocol 2
 
 # Enable root login with password
@@ -180,15 +177,15 @@ log "Configuring fail2ban..."
 
 cat > "$FAIL_JAIL" <<'EOF'
 [DEFAULT]
-bantime = 1h
+bantime  = 1h
 findtime = 10m
 maxretry = 5
 
 [sshd]
-enabled = true
-port = ssh
-logpath = %(sshd_log)s
-backend = systemd
+enabled  = true
+port     = 22,2808
+logpath  = %(sshd_log)s
+backend  = systemd
 EOF
 
 systemctl enable fail2ban >/dev/null 2>&1 || true
@@ -198,29 +195,48 @@ systemctl restart fail2ban >/dev/null 2>&1 || true
 
 log "Configuring UFW firewall..."
 
-# --- SSH (custom port) ---
-ufw allow 2808/tcp >/dev/null 2>&1 || true
-ufw limit 2808/tcp >/dev/null 2>&1 || true
+# --- SSH (primary + fallback) ---
+ufw allow 22/tcp    >/dev/null 2>&1 || true
+ufw limit 22/tcp    >/dev/null 2>&1 || true
 
-# Clean up default SSH rules on port 22 if present
-ufw delete allow 22/tcp >/dev/null 2>&1 || true
-ufw delete limit 22/tcp >/dev/null 2>&1 || true
+ufw allow 2808/tcp  >/dev/null 2>&1 || true
+ufw limit 2808/tcp  >/dev/null 2>&1 || true
 
 # --- Core Web + Panel Ports ---
 
 # HTTP / HTTPS
-ufw allow 80/tcp  >/dev/null 2>&1 || true
-ufw allow 443/tcp >/dev/null 2>&1 || true
+ufw allow 80/tcp    >/dev/null 2>&1 || true
+ufw allow 443/tcp   >/dev/null 2>&1 || true
 
 # CyberPanel panel
-ufw allow 8090/tcp >/dev/null 2>&1 || true
+ufw allow 8090/tcp  >/dev/null 2>&1 || true
 
 # OpenLiteSpeed WebAdmin
-ufw allow 7080/tcp >/dev/null 2>&1 || true
+ufw allow 7080/tcp  >/dev/null 2>&1 || true
 
 # --- DNS (for nameserver / resolver if used) ---
-ufw allow 53/tcp  >/dev/null 2>&1 || true
-ufw allow 53/udp  >/dev/null 2>&1 || true
+ufw allow 53/tcp    >/dev/null 2>&1 || true
+ufw allow 53/udp    >/dev/null 2>&1 || true
+
+# --- Mail Services ---
+ufw allow 25/tcp    >/dev/null 2>&1 || true
+ufw allow 465/tcp   >/dev/null 2>&1 || true
+ufw allow 587/tcp   >/dev/null 2>&1 || true
+ufw allow 110/tcp   >/dev/null 2>&1 || true
+ufw allow 995/tcp   >/dev/null 2>&1 || true
+ufw allow 143/tcp   >/dev/null 2>&1 || true
+ufw allow 993/tcp   >/dev/null 2>&1 || true
+
+# --- FTP + Passive FTP ---
+ufw allow 21/tcp           >/dev/null 2>&1 || true
+ufw allow 40110:40210/tcp  >/dev/null 2>&1 || true
+
+# --- Default Policies ---
+ufw default deny incoming  >/dev/null 2>&1 || true
+ufw default allow outgoing >/dev/null 2>&1 || true
+
+log "Enabling firewall..."
+ufw --force enable >/dev/null 2>&1 || true
 
 # --- Mail Services ---
 
