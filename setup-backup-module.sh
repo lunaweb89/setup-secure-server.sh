@@ -60,6 +60,7 @@ if [[ -f "${BORG_PASSFILE}" ]]; then
   log "Existing Borg passphrase found at ${BORG_PASSFILE}, reusing."
 else
   log "Generating secure Borg passphrase..."
+  # 32-char random string, escape '-' and force C locale
   GENERATED_PASSPHRASE="$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_\-+=' </dev/urandom | head -c 32 || true)"
 
   if [[ -z "${GENERATED_PASSPHRASE}" ]]; then
@@ -100,13 +101,8 @@ else
   log "Existing SSH key found at /root/.ssh/id_rsa, reusing."
 fi
 
-# Test if key already works (no password)
-if ssh -p "${BOXPORT}" -o BatchMode=yes -o ConnectTimeout=5 "${BOXUSER}@${BOXHOST}" true 2>/dev/null; then
-  log "SSH key already works on Storage Box, skipping ssh-copy-id."
-else
-  log "Copying SSH key to Storage Box with sshpass (Hetzner requires -s)..."
-  sshpass -p "${BOXPASS}" ssh-copy-id -s -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
-fi
+log "Copying SSH key to Storage Box with sshpass (Hetzner requires -s)..."
+sshpass -p "${BOXPASS}" ssh-copy-id -s -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" || true
 
 # We don't need the password anymore; clear it from memory
 unset BOXPASS
@@ -120,9 +116,9 @@ log "Testing Storage Box connectivity by uploading a test file..."
 TESTFILE_LOCAL="/tmp/storagebox-test-$(date +%s).txt"
 TESTFILE_REMOTE="test-upload-$(hostname)-$(date +%s).txt"
 
-echo "Storage Box test file created at $(date -Is)" > "$TESTFILE_LOCAL"
+echo "Storage Box test file created at $(date -Is)" > "${TESTFILE_LOCAL}"
 
-if scp -P "${BOXPORT}" "$TESTFILE_LOCAL" "${BOXUSER}@${BOXHOST}:${TESTFILE_REMOTE}" >/dev/null 2>&1; then
+if scp -P "${BOXPORT}" "${TESTFILE_LOCAL}" "${BOXUSER}@${BOXHOST}:${TESTFILE_REMOTE}" >/dev/null 2>&1; then
   log "Test file upload SUCCESSFUL: ${TESTFILE_REMOTE}"
 else
   err "Test upload FAILED — cannot write to Storage Box!"
@@ -135,7 +131,7 @@ else
 fi
 
 ssh -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" "rm -f ${TESTFILE_REMOTE}" >/dev/null 2>&1 || true
-rm -f "$TESTFILE_LOCAL" || true
+rm -f "${TESTFILE_LOCAL}" || true
 
 log "Storage Box connectivity OK."
 
@@ -165,7 +161,7 @@ log "Creating /usr/local/bin/pre-upgrade-backup.sh ..."
 
 mkdir -p /var/log/borg
 
-cat > /usr/local/bin/pre-upgrade-backup.sh <<'EOF'
+cat > /usr/local/bin/pre-upgrade-backup.sh << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -196,22 +192,22 @@ exec >> "$LOG" 2>&1
 echo "###### Backup started: $(date -Is) ######"
 
 "$BORG_BIN" create -v --stats \
-    "$REPOSITORY::$(hostname)-{now:%Y-%m-%d_%H:%M}" \
-    / \
-    --exclude /dev \
-    --exclude /proc \
-    --exclude /sys \
-    --exclude /run \
-    --exclude /var/run \
-    --exclude /tmp \
-    --exclude /var/tmp \
-    --exclude /var/cache \
-    --exclude /var/log/journal \
-    --exclude /var/lib/lxcfs \
-    --exclude /mnt \
-    --exclude /media \
-    --exclude /lost+found \
-    --exclude /swapfile
+  "$REPOSITORY::$(hostname)-{now:%Y-%m-%d_%H:%M}" \
+  / \
+  --exclude /dev \
+  --exclude /proc \
+  --exclude /sys \
+  --exclude /run \
+  --exclude /var/run \
+  --exclude /tmp \
+  --exclude /var/tmp \
+  --exclude /var/cache \
+  --exclude /var/log/journal \
+  --exclude /var/lib/lxcfs \
+  --exclude /mnt \
+  --exclude /media \
+  --exclude /lost+found \
+  --exclude /swapfile
 
 "$BORG_BIN" prune -v --list \
   --keep-daily=7 \
@@ -237,7 +233,7 @@ log "Creating daily backup cronjob..."
 
 CRON_BACKUP="/etc/cron.d/daily-borg-backup"
 
-cat > "$CRON_BACKUP" <<'EOF'
+cat > "$CRON_BACKUP" << 'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
