@@ -215,8 +215,8 @@ Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
 EOF
 
   cat > "$AU" <<EOF
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::Update-Package-Lists "7";
+APT::Periodic::Unattended-Upgrade "7";
 EOF
 
   # Monthly updates on 1st at 13:30 (cron in system time)
