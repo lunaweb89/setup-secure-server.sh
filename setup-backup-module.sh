@@ -2,8 +2,11 @@
 #
 # setup-backup-module.sh
 #
-# Adds BorgBackup + Hetzner Storage Box weekly backups.
-# Auto-generates encryption passphrase and prints it at the end.
+# Adds BorgBackup + Hetzner Storage Box daily backups.
+# - Auto-generates encryption passphrase and prints it at the end.
+# - Stores repo URL and passphrase locally for backup/restore helpers.
+# - Daily backups at 08:30
+# - Retention: 7 daily, 4 weekly, 3 monthly
 #
 
 set -euo pipefail
@@ -43,18 +46,26 @@ fi
 REPOSITORY="ssh://${BOXUSER}@${BOXHOST}:${BOXPORT}/./backups/${REPO_DIR}"
 log "Borg repository will be: ${REPOSITORY}"
 
+BORG_PASSFILE="/root/.borg-passphrase"
+REPO_FILE="/root/.borg-repository"
+
 # -------------------------------------------------------------
 # AUTO-GENERATE PASSPHRASE
 # -------------------------------------------------------------
 
-BORG_PASSFILE="/root/.borg-passphrase"
 GENERATED_PASSPHRASE=""
 
 if [[ -f "${BORG_PASSFILE}" ]]; then
   log "Existing Borg passphrase found at ${BORG_PASSFILE}, reusing."
 else
   log "Generating secure Borg passphrase..."
-  GENERATED_PASSPHRASE="$(openssl rand -base64 32 | tr -d '\n')"
+  # 32-character random string from /dev/urandom (no openssl dependency)
+  GENERATED_PASSPHRASE="$(tr -dc 'A-Za-z0-9!@#$%^&*_-+=' </dev/urandom | head -c 32 || true)"
+
+  if [[ -z "${GENERATED_PASSPHRASE}" ]]; then
+    err "Failed to generate random passphrase."
+    exit 1
+  fi
 
   echo "${GENERATED_PASSPHRASE}" > "${BORG_PASSFILE}"
   chmod 600 "${BORG_PASSFILE}"
@@ -63,6 +74,10 @@ else
 fi
 
 BORG_PASSPHRASE="$(<"${BORG_PASSFILE}")"
+
+# Store repo URL for restore helpers
+echo "${REPOSITORY}" > "${REPO_FILE}"
+chmod 600 "${REPO_FILE}"
 
 # -------------------------------------------------------------
 # INSTALL BORG
@@ -139,75 +154,94 @@ rm -f /tmp/borg-init.log || true
 unset BORG_PASSPHRASE
 
 # -------------------------------------------------------------
-# CREATE WEEKLY BACKUP SCRIPT
+# CREATE DAILY BACKUP SCRIPT
 # -------------------------------------------------------------
 
 log "Creating /usr/local/bin/pre-upgrade-backup.sh ..."
 
 mkdir -p /var/log/borg
 
-cat > /usr/local/bin/pre-upgrade-backup.sh <<EOF
+cat > /usr/local/bin/pre-upgrade-backup.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 BORG_PASSFILE="/root/.borg-passphrase"
-if [[ ! -f "\$BORG_PASSFILE" ]]; then
-  echo "[ERROR] Borg passphrase file missing at \$BORG_PASSFILE" >&2
+REPO_FILE="/root/.borg-repository"
+LOG="/var/log/borg/backup.log"
+BORG_BIN="$(command -v borg || echo /usr/bin/borg)"
+
+if [[ ! -f "$BORG_PASSFILE" ]]; then
+  echo "[ERROR] Borg passphrase file missing at $BORG_PASSFILE" >&2
   exit 1
 fi
 
-export BORG_PASSPHRASE="\$(<"\$BORG_PASSFILE")"
-REPOSITORY="${REPOSITORY}"
-LOG='/var/log/borg/backup.log'
-BORG_BIN="\$(command -v borg || echo /usr/bin/borg)"
+if [[ ! -f "$REPO_FILE" ]]; then
+  echo "[ERROR] Borg repository file missing at $REPO_FILE" >&2
+  exit 1
+fi
 
-mkdir -p /var/log/borg
-touch "\$LOG"
-chmod 600 "\$LOG"
+export BORG_PASSPHRASE="$(<"$BORG_PASSFILE")"
+REPOSITORY="$(<"$REPO_FILE")"
 
-exec >> "\$LOG" 2>&1
+mkdir -p "$(dirname "$LOG")"
+touch "$LOG"
+chmod 600 "$LOG"
 
-echo "###### Backup started: \$(date -Is) ######"
+exec >> "$LOG" 2>&1
 
-"\$BORG_BIN" create -v --stats \\
-    "\$REPOSITORY::\{now:%Y-%m-%d_%H:%M\}" \\
-    / \\
-    --exclude /dev \\
-    --exclude /proc \\
-    --exclude /sys \\
-    --exclude /var/run \\
-    --exclude /run \\
-    --exclude /lost+found \\
-    --exclude /mnt \\
-    --exclude /var/lib/lxcfs
+echo "###### Backup started: $(date -Is) ######"
 
-"\$BORG_BIN" prune -v --list --keep-daily=30 "\$REPOSITORY"
-"\$BORG_BIN" compact "\$REPOSITORY" || true
+"$BORG_BIN" create -v --stats \
+    "$REPOSITORY::$(hostname)-{now:%Y-%m-%d_%H:%M}" \
+    / \
+    --exclude /dev \
+    --exclude /proc \
+    --exclude /sys \
+    --exclude /run \
+    --exclude /var/run \
+    --exclude /tmp \
+    --exclude /var/tmp \
+    --exclude /var/cache \
+    --exclude /var/log/journal \
+    --exclude /var/lib/lxcfs \
+    --exclude /mnt \
+    --exclude /media \
+    --exclude /lost+found \
+    --exclude /swapfile
 
+"$BORG_BIN" prune -v --list \
+  --keep-daily=7 \
+  --keep-weekly=4 \
+  --keep-monthly=3 \
+  "$REPOSITORY"
+
+"$BORG_BIN" compact "$REPOSITORY" || true
+
+mkdir -p /var/run
 touch /var/run/backup-ok
 
-echo "###### Backup ended: \$(date -Is) ######"
+echo "###### Backup ended: $(date -Is) ######"
 EOF
 
 chmod 700 /usr/local/bin/pre-upgrade-backup.sh
 
 # -------------------------------------------------------------
-# WEEKLY BACKUP CRON
+# DAILY BACKUP CRON (08:30)
 # -------------------------------------------------------------
 
-log "Creating weekly backup cronjob..."
+log "Creating daily backup cronjob..."
 
-CRON_BACKUP="/etc/cron.d/weekly-backup"
+CRON_BACKUP="/etc/cron.d/daily-borg-backup"
 
-cat > "\$CRON_BACKUP" <<EOF
+cat > "$CRON_BACKUP" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Weekly full-system Borg backup (Sunday @ 12:00)
-0 12 * * 0 root /usr/local/bin/pre-upgrade-backup.sh
+# Daily full-system Borg backup (08:30 every day)
+30 8 * * * root /usr/local/bin/pre-upgrade-backup.sh
 EOF
 
-chmod 644 "\$CRON_BACKUP"
+chmod 644 "$CRON_BACKUP"
 
 # -------------------------------------------------------------
 # TEST REMOTE ACCESS
@@ -234,7 +268,8 @@ echo "------------------------------------------------------------"
 echo "${BORG_PASSPHRASE}"
 echo "------------------------------------------------------------"
 echo "The passphrase is stored locally at: /root/.borg-passphrase"
-echo "But YOU must save the above passphrase somewhere safe."
+echo "The repository URL is stored at:    /root/.borg-repository"
+echo "You must save the above passphrase somewhere safe."
 echo
 
 exit 0
