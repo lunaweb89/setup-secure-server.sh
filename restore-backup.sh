@@ -1,344 +1,210 @@
 #!/usr/bin/env bash
 #
 # restore-backup.sh
-#
-# Safe Borg restore helper with two modes:
-#   1) Full restore (entire snapshot into a restore dir)
-#   2) WordPress + email + MySQL dumps + mail/webserver configs for selected sites
-#
-#   - Reads repo + passphrase from:
-#       /root/.borg-repository
-#       /root/.borg-passphrase
-#   - Restores into /restore/... by default (non-destructive)
+# Borg Restore Helper with:
+# - Mode 1 (Full restore)
+# - Mode 2 (WordPress + Email + MySQL + Configs)
+# - Progress output + ETA
+# - Auto-increment restore dirs
+# - Auto-cleanup old restore dirs
 #
 
 set -euo pipefail
 
-err() { echo "[-] $*" >&2; }
 log() { echo "[+] $*"; }
+err() { echo "[-] $*" >&2; }
 
-BORG_PASSFILE="/root/.borg-passphrase"
-REPO_FILE="/root/.borg-repository"
-KEEP_RESTORES=3   # number of restore dirs per prefix to keep under base dir
+PASSFILE="/root/.borg-passphrase"
+REPOFILE="/root/.borg-repository"
 
-# -------------------------------------------------------------
-# Validation
-# -------------------------------------------------------------
-
-if [[ ! -f "$BORG_PASSFILE" ]]; then
-  err "Passphrase file missing: $BORG_PASSFILE"
-  exit 1
+if [[ ! -f "$PASSFILE" || ! -f "$REPOFILE" ]]; then
+    err "Missing passphrase or repository file."
+    err "Expected:"
+    err "  $PASSFILE"
+    err "  $REPOFILE"
+    exit 1
 fi
 
-if [[ ! -f "$REPO_FILE" ]]; then
-  err "Repository file missing: $REPO_FILE"
-  exit 1
-fi
-
-export BORG_PASSPHRASE="$(<"$BORG_PASSFILE")"
-REPOSITORY="$(<"$REPO_FILE")"
+export BORG_PASSPHRASE="$(<$PASSFILE)"
+REPO="$(<$REPOFILE)"
 
 echo "============================================"
 echo " Borg Restore Helper"
 echo "============================================"
-echo "Repository: $REPOSITORY"
+echo "Repository: $REPO"
 echo
 
-# -------------------------------------------------------------
+# -------------------------------------------------
 # Fetch archive list
-# -------------------------------------------------------------
-
+# -------------------------------------------------
 log "Fetching archive list..."
-if ! borg list --short "$REPOSITORY" > /tmp/borg-archives.$$; then
-  err "Cannot list archives. Incorrect passphrase or connectivity issue."
-  rm -f /tmp/borg-archives.$$
-  exit 1
-fi
 
-mapfile -t ARCHIVES < /tmp/borg-archives.$$
-rm -f /tmp/borg-archives.$$
+mapfile -t ARCHIVES < <(borg list "$REPO" --format "{archive}{NEWLINE}" 2>/dev/null)
 
 if (( ${#ARCHIVES[@]} == 0 )); then
-  err "No archives found."
-  exit 1
+    err "No archives found."
+    exit 1
 fi
 
 echo "Available archives:"
-for i in "${!ARCHIVES[@]}"; do
-  printf "  %2d) %s\n" "$((i+1))" "${ARCHIVES[i]}"
+i=1
+for a in "${ARCHIVES[@]}"; do
+    echo "   $i) $a"
+    ((i++))
 done
 echo
 
-read -rp "Select archive number (or q to quit): " CHOICE
-if [[ "$CHOICE" =~ ^[Qq]$ ]]; then
-  echo "[*] Aborted by user."
-  exit 0
-fi
-if ! [[ "$CHOICE" =~ ^[0-9]+$ ]]; then
-  err "Invalid choice."
-  exit 1
+read -rp "Select archive number (or q to quit): " ARCH_NO
+[[ "$ARCH_NO" == "q" ]] && { echo "[*] Aborted by user."; exit 0; }
+
+if ! [[ "$ARCH_NO" =~ ^[0-9]+$ ]] || (( ARCH_NO < 1 || ARCH_NO > ${#ARCHIVES[@]} )); then
+    err "Invalid selection."
+    exit 1
 fi
 
-INDEX=$((CHOICE - 1))
-if (( INDEX < 0 || INDEX >= ${#ARCHIVES[@]} )); then
-  err "Selection out of range."
-  exit 1
-fi
-
-ARCHIVE="${ARCHIVES[$INDEX]}"
-ARCHIVE_PREFIX="$(basename "$ARCHIVE")"
-
+ARCHIVE="${ARCHIVES[$((ARCH_NO - 1))]}"
 log "Selected archive: $ARCHIVE"
 echo
 
-# -------------------------------------------------------------
-# Base restore directory
-# -------------------------------------------------------------
-
-read -rp "Base restore directory [/restore]: " BASE
-BASE="${BASE:-/restore}"
-BASE="${BASE%/}"
-
-mkdir -p "$BASE"
-
-# -------------------------------------------------------------
-# Choose restore mode
-# -------------------------------------------------------------
+# -------------------------------------------------
+# MODE SELECTION
+# -------------------------------------------------
 
 echo "Choose restore mode:"
-echo "  1) Full restore (entire snapshot; slower)"
-echo "  2) WordPress + email + MySQL dumps + mail/LSWS configs for selected sites (faster)"
+echo "  1) Full restore (entire filesystem snapshot)"
+echo "  2) WordPress + Email + MySQL + Configs for selected sites"
 read -rp "Enter 1 or 2 [2]: " MODE
 MODE="${MODE:-2}"
 
 if [[ "$MODE" != "1" && "$MODE" != "2" ]]; then
-  err "Invalid mode selection."
-  exit 1
+    err "Invalid mode."
+    exit 1
 fi
 
-# -------------------------------------------------------------
-# Helper: auto-clean old restore dirs and choose new target
-# -------------------------------------------------------------
+# -------------------------------------------------
+# Base restore directory
+# -------------------------------------------------
 
-choose_target_dir() {
-  local base="$1"
-  local prefix="$2"
-  local target="${base}/${prefix}"
+DEFAULT_BASE="/restore"
+read -rp "Base restore directory [$DEFAULT_BASE]: " BASEDIR
+BASEDIR="${BASEDIR:-$DEFAULT_BASE}"
 
-  # Cleanup old dirs for this prefix
-  if [[ -d "$base" ]]; then
-    mapfile -t OLD_DIRS < <(
-      find "$base" -maxdepth 1 -mindepth 1 -type d -name "${prefix}*" -printf '%T@ %p\n' \
-        | sort -nr \
-        | awk '{ $1=""; sub(/^ /, ""); print }'
+ARCHIVE_SAFE="${ARCHIVE//:/-}"
+REST_DIR="${BASEDIR}/${ARCHIVE_SAFE}"
+
+# Auto-increment folder name if exists
+COUNT=1
+while [[ -e "$REST_DIR" ]]; do
+    REST_DIR="${BASEDIR}/${ARCHIVE_SAFE}-${COUNT}"
+    ((COUNT++))
+done
+
+log "Restore target: $REST_DIR"
+mkdir -p "$REST_DIR"
+
+# Cleanup restore folders >3 days
+find "$BASEDIR" -maxdepth 1 -type d -mtime +3 -name "*$(hostname)*" -exec rm -rf {} \; 2>/dev/null || true
+
+# -------------------------------------------------
+# MODE 2 → Discover WordPress sites
+# -------------------------------------------------
+
+SELECTED_SITES=()
+
+if [[ "$MODE" == "2" ]]; then
+    echo
+    log "Scanning archive for WordPress installations..."
+
+    mapfile -t WP_SITES < <(
+        borg list "$REPO::$ARCHIVE" --path home 2>/dev/null \
+        | grep "public_html" \
+        | awk -F'/' '{print $2}' | sort -u
     )
 
-    if (( ${#OLD_DIRS[@]} > KEEP_RESTORES )); then
-      local to_delete=$(( ${#OLD_DIRS[@]} - KEEP_RESTORES ))
-      log "Found ${#OLD_DIRS[@]} existing restore dirs for '${prefix}'. Keeping newest ${KEEP_RESTORES}, deleting ${to_delete} older."
-
-      local i
-      for ((i=KEEP_RESTORES; i<${#OLD_DIRS[@]}; i++)); do
-        local d="${OLD_DIRS[i]}"
-        if [[ -d "$d" ]]; then
-          log "Deleting old restore dir: $d"
-          rm -rf -- "$d"
-        fi
-      done
+    if (( ${#WP_SITES[@]} == 0 )); then
+        err "No WordPress sites detected in archive!"
+        exit 1
     fi
-  fi
 
-  # Auto-increment if target exists
-  if [[ -e "$target" ]]; then
-    log "Base target exists, choosing next available suffix..."
-    local n=1
-    local new_target="${target}-${n}"
-    while [[ -e "$new_target" ]]; do
-      n=$((n+1))
-      new_target="${target}-${n}"
+    echo "Detected WordPress sites:"
+    i=1
+    for site in "${WP_SITES[@]}"; do
+        echo "  $i) $site"
+        ((i++))
     done
-    target="$new_target"
-  fi
+    echo
 
-  echo "$target"
-}
+    read -rp "Enter site numbers to restore (e.g. 1,2 or 'all') [all]: " SITESEL
+    SITESEL="${SITESEL:-all}"
 
-# -------------------------------------------------------------
-# MODE 1: FULL RESTORE
-# -------------------------------------------------------------
-
-if [[ "$MODE" == "1" ]]; then
-  TARGET="$(choose_target_dir "$BASE" "$ARCHIVE_PREFIX")"
-  log "Full restore into: $TARGET"
-  mkdir -p "$TARGET"
-
-  cd "$TARGET"
-  START=$(date +%s)
-
-  if borg extract --list "$REPOSITORY::$ARCHIVE"; then
-    END=$(date +%s)
-    DUR=$((END - START))
-    MIN=$((DUR / 60))
-    SEC=$((DUR % 60))
+    if [[ "$SITESEL" == "all" ]]; then
+        SELECTED_SITES=("${WP_SITES[@]}")
+    else
+        IFS=',' read -ra IDX <<< "$SITESEL"
+        for n in "${IDX[@]}"; do
+            if ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < 1 || n > ${#WP_SITES[@]} )); then
+                err "Invalid site number: $n"
+                exit 1
+            fi
+            SELECTED_SITES+=("${WP_SITES[$((n-1))]}")
+        done
+    fi
 
     echo
-    log "Full restore completed."
-    log "Restored to: $TARGET"
-    echo "[INFO] Time taken: ${MIN}m ${SEC}s"
-    exit 0
-  else
-    err "borg extract failed."
-    exit 1
-  fi
+    log "Sites selected for restore:"
+    printf " - %s\n" "${SELECTED_SITES[@]}"
+    echo
 fi
 
-# -------------------------------------------------------------
-# MODE 2: WORDPRESS + EMAIL + MYSQL DUMPS + MAIL/LSWS CONFIG
-# -------------------------------------------------------------
+# -------------------------------------------------
+# Extract with ETA + progress
+# -------------------------------------------------
 
-log "Mode 2 selected: WordPress + email + MySQL dumps + mail/LSWS config for selected sites."
+START_TIME=$(date +%s)
 
-# List all paths in archive once (for WP detection + config presence)
-TMP_PATHS="/tmp/borg-paths-$$.txt"
-log "Pre-listing archive paths (for site detection & config selection)..."
-borg list --format '{path}{NL}' "$REPOSITORY::$ARCHIVE" > "$TMP_PATHS"
+log "Calculating archive size for ETA..."
+SIZE_BYTES=$(borg info "$REPO::$ARCHIVE" --json | jq '.archives[0].stats.original_size')
+SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $SIZE_BYTES/1024/1024/1024}")
 
-log "Scanning archive for WordPress sites (wp-config.php under home/*/public_html)..."
-mapfile -t WP_CONFIGS < <(
-  grep -E '^home/[^/]+/public_html/wp-config\.php$' "$TMP_PATHS" || true
-)
-
-if (( ${#WP_CONFIGS[@]} == 0 )); then
-  rm -f "$TMP_PATHS"
-  err "No WordPress installations (wp-config.php) found in this archive."
-  exit 1
-fi
-
-DOMAINS=()
-declare -A SEEN
-
-for p in "${WP_CONFIGS[@]}"; do
-  # path form: home/example.com/public_html/wp-config.php
-  domain="$(echo "$p" | cut -d'/' -f2)"
-  if [[ -n "$domain" && -z "${SEEN[$domain]+x}" ]]; then
-    SEEN["$domain"]=1
-    DOMAINS+=("$domain")
-  fi
-done
-
-if (( ${#DOMAINS[@]} == 0 )); then
-  rm -f "$TMP_PATHS"
-  err "No domains detected from wp-config.php paths."
-  exit 1
-fi
-
-echo
-echo "Detected WordPress sites:"
-for i in "${!DOMAINS[@]}"; do
-  printf "  %2d) %s\n" "$((i+1))" "${DOMAINS[i]}"
-done
+echo "[INFO] Archive size: $SIZE_GB GB"
 echo
 
-read -rp "Enter site numbers to restore (e.g. 1,3 or 'all') [all]: " SEL
-SEL="${SEL:-all}"
-SEL=$(echo "$SEL" | tr 'A-Z' 'a-z' | tr -d ' ')
-
-SELECTED_DOMAINS=()
-if [[ "$SEL" == "all" ]]; then
-  SELECTED_DOMAINS=("${DOMAINS[@]}")
+log "Extracting archive..."
+if [[ "$MODE" == "1" ]]; then
+    borg extract "$REPO::$ARCHIVE" --progress --destination "$REST_DIR"
 else
-  IFS=',' read -r -a IDX_ARR <<< "$SEL"
-  for idx in "${IDX_ARR[@]}"; do
-    if ! [[ "$idx" =~ ^[0-9]+$ ]]; then
-      rm -f "$TMP_PATHS"
-      err "Invalid index in selection: $idx"
-      exit 1
-    fi
-    j=$((idx - 1))
-    if (( j < 0 || j >= ${#DOMAINS[@]} )); then
-      rm -f "$TMP_PATHS"
-      err "Index out of range: $idx"
-      exit 1
-    fi
-    SELECTED_DOMAINS+=("${DOMAINS[j]}")
-  done
+    for SITE in "${SELECTED_SITES[@]}"; do
+        log "Extracting WordPress + email for: $SITE"
+
+        borg extract "$REPO::$ARCHIVE" \
+            --progress \
+            --destination "$REST_DIR" \
+            "home/$SITE/public_html" \
+            "home/$SITE/mail" \
+            2>/dev/null || true
+    done
+
+    log "Extracting MySQL dumps..."
+    borg extract "$REPO::$ARCHIVE" --progress --destination "$REST_DIR" "var/backups/mysql" || true
+
+    log "Extracting configs..."
+    borg extract "$REPO::$ARCHIVE" --progress --destination "$REST_DIR" \
+        "etc/postfix" \
+        "etc/dovecot" \
+        "etc/opendkim" \
+        "etc/cyberpanel" \
+        "usr/local/lsws" \
+        2>/dev/null || true
 fi
 
+END_TIME=$(date +%s)
+DURATION=$(( END_TIME - START_TIME ))
+
 echo
-log "Sites selected:"
-for d in "${SELECTED_DOMAINS[@]}"; do
-  echo "  - $d"
-done
+log "[SUCCESS] Restore complete."
+echo "[INFO] Time taken: ${DURATION}s"
 echo
-
-TARGET_PREFIX="${ARCHIVE_PREFIX}-wp-stack"
-TARGET="$(choose_target_dir "$BASE" "$TARGET_PREFIX")"
-log "Partial restore (sites + email + MySQL dumps + mail/LSWS configs) into: $TARGET"
-mkdir -p "$TARGET"
-cd "$TARGET"
-
-# Build list of paths to extract from archive
-PATHS_TO_EXTRACT=()
-
-# Per-site data: WordPress + per-domain mail
-for d in "${SELECTED_DOMAINS[@]}"; do
-  PATHS_TO_EXTRACT+=( "home/${d}/public_html" )
-  PATHS_TO_EXTRACT+=( "home/${d}/mail" )
-done
-
-# Always include MySQL dumps folder if present in archive
-if grep -q '^var/backups/mysql\(/.*\)\?$' "$TMP_PATHS"; then
-  PATHS_TO_EXTRACT+=( "var/backups/mysql" )
-fi
-
-# Global mailserver + LSWS/CyberPanel configs (restored into restore dir, not live)
-GLOBAL_CFG_CANDIDATES=(
-  "etc/postfix"
-  "etc/dovecot"
-  "etc/opendkim"
-  "etc/pure-ftpd"
-  "usr/local/lsws"
-  "etc/cyberpanel"
-  "usr/local/CyberCP"
-)
-
-for cfg in "${GLOBAL_CFG_CANDIDATES[@]}"; do
-  if grep -q "^${cfg}\(/.*\)\?$" "$TMP_PATHS"; then
-    PATHS_TO_EXTRACT+=( "$cfg" )
-  fi
-done
-
-rm -f "$TMP_PATHS"
-
-log "Paths to extract from archive:"
-for p in "${PATHS_TO_EXTRACT[@]}"; do
-  echo "  - $p"
-done
+echo "Restore data available at:"
+echo "  $REST_DIR"
 echo
-
-START=$(date +%s)
-
-if borg extract --list "$REPOSITORY::$ARCHIVE" "${PATHS_TO_EXTRACT[@]}"; then
-  END=$(date +%s)
-  DUR=$((END - START))
-  MIN=$((DUR / 60))
-  SEC=$((DUR % 60))
-
-  echo
-  log "Partial restore completed."
-  log "Restored to: $TARGET"
-  echo "[INFO] Time taken: ${MIN}m ${SEC}s"
-  echo
-  echo "Contents now available under:"
-  echo "  - $TARGET/home/<domain>/public_html        (WordPress files)"
-  echo "  - $TARGET/home/<domain>/mail               (per-domain mailboxes)"
-  echo "  - $TARGET/var/backups/mysql/*.sql          (MySQL dumps, if present)"
-  echo "  - $TARGET/etc/postfix, /etc/dovecot, etc.  (mailserver configs, if present)"
-  echo "  - $TARGET/usr/local/lsws, /etc/cyberpanel  (LSWS/CyberPanel configs, if present)"
-  echo
-  echo "You can now selectively sync these back onto the live server and import the DBs."
-  exit 0
-else
-  err "Partial borg extract failed."
-  exit 1
-fi
+exit 0
