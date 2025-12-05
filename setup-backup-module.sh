@@ -151,7 +151,7 @@ if ! "${BORG_BIN}" init --encryption=repokey --make-parent-dirs "${REPOSITORY}" 
   fi
 fi
 rm -f /tmp/borg-init.log || true
-# Do NOT unset BORG_PASSPHRASE here, we still need to print it later
+# Do NOT unset BORG_PASSPHRASE; we still want to print it later
 
 # -------------------------------------------------------------
 # CREATE DAILY BACKUP SCRIPT
@@ -226,6 +226,55 @@ EOF
 chmod 700 /usr/local/bin/pre-upgrade-backup.sh
 
 # -------------------------------------------------------------
+# CREATE PASSPHRASE / REPO VERIFICATION HELPER
+# -------------------------------------------------------------
+
+log "Creating /usr/local/bin/borg-passphrase-test.sh ..."
+
+cat > /usr/local/bin/borg-passphrase-test.sh << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BORG_PASSFILE="/root/.borg-passphrase"
+REPO_FILE="/root/.borg-repository"
+
+if [[ ! -f "$BORG_PASSFILE" ]]; then
+  echo "[ERROR] Passphrase file missing: $BORG_PASSFILE"
+  exit 1
+fi
+
+if [[ ! -f "$REPO_FILE" ]]; then
+  echo "[ERROR] Repository file missing: $REPO_FILE"
+  exit 1
+fi
+
+export BORG_PASSPHRASE="$(<"$BORG_PASSFILE")"
+REPOSITORY="$(<"$REPO_FILE")"
+
+echo "--------------------------------------------"
+echo " Testing Borg passphrase & repository access"
+echo "--------------------------------------------"
+echo "Repository: $REPOSITORY"
+echo
+
+if borg list "$REPOSITORY"; then
+  echo
+  echo "[SUCCESS] Passphrase is correct and archive decryption works."
+  echo "[SUCCESS] Repository is readable over SSH."
+else
+  echo
+  echo "[FAILED] Borg could not read the repository."
+  echo "Check passphrase or connectivity."
+  exit 1
+fi
+
+echo "--------------------------------------------"
+echo "Test complete."
+EOF
+
+chmod 755 /usr/local/bin/borg-passphrase-test.sh
+
+# -------------------------------------------------------------
 # DAILY BACKUP CRON (08:30)
 # -------------------------------------------------------------
 
@@ -244,7 +293,7 @@ EOF
 chmod 644 "$CRON_BACKUP"
 
 # -------------------------------------------------------------
-# COMPLETION & PASSPHRASE DISPLAY
+# COMPLETION & PASSPHRASE DISPLAY + VERIFICATION
 # -------------------------------------------------------------
 
 echo
@@ -259,5 +308,8 @@ echo "The passphrase is stored locally at: /root/.borg-passphrase"
 echo "The repository URL is stored at:    /root/.borg-repository"
 echo "You must save the above passphrase somewhere safe."
 echo
+
+log "Running borg-passphrase-test.sh to verify access..."
+/usr/local/bin/borg-passphrase-test.sh || err "Verification failed – check output above."
 
 exit 0
