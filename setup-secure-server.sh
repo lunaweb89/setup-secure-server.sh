@@ -15,7 +15,7 @@
 #   - Create weekly malware scan cron job
 #
 # Run directly:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server.sh/main/setup-secure-server.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-secure-server.sh)
 
 set -u   # strict on unset vars
 set -o pipefail
