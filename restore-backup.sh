@@ -62,13 +62,11 @@ echo
 # -------------------------------------------------------------
 
 log "Fetching archive list..."
-ARCHIVES_RAW="$($BORG_BIN list "$REPOSITORY" --format '{archive}{NEWLINE}')"
-if [[ -z "$ARCHIVES_RAW" ]]; then
+mapfile -t ARCHIVES < <("$BORG_BIN" list "$REPOSITORY" --format '{archive}{NEWLINE}')
+if (( ${#ARCHIVES[@]} == 0 )); then
   err "No archives found in repository."
   exit 1
 fi
-
-IFS=$'\n' read -r -d '' -a ARCHIVES <<<"$(printf '%s\0' $ARCHIVES_RAW)"
 
 echo "Available archives:"
 for i in "${!ARCHIVES[@]}"; do
@@ -120,7 +118,7 @@ mkdir -p "$TARGET"
 # -------------------------------------------------------------
 
 echo "Choose restore mode:"
-echo "  1) Full restore (entire snapshot; slower)"
+echo "  1) Full restore (entire snapshot; slower, manual apply)"
 echo "  2) WordPress + MySQL + mail/LSWS/CyberPanel configs for selected sites (faster, automatic)"
 read -rp "Enter 1 or 2 [2]: " MODE
 MODE="${MODE:-2}"
@@ -168,9 +166,9 @@ fi
 # -------------------------------------------------------------
 
 log "Mode 2 selected: WordPress + MySQL + mail/LSWS/CyberPanel configs for selected sites."
-log "Listing archive paths for detection..."
 
 TMP_PATHS="$(mktemp)"
+log "Listing archive paths for detection..."
 if ! "$BORG_BIN" list "$REPOSITORY::$ARCHIVE" --format '{path}{NEWLINE}' > "$TMP_PATHS"; then
   rm -f "$TMP_PATHS"
   err "Failed to list archive contents."
