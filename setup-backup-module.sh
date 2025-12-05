@@ -3,8 +3,11 @@
 # setup-backup-module.sh
 #
 # Adds BorgBackup + Hetzner Storage Box daily backups.
-# - Auto-generates encryption passphrase and prints it at the end.
-# - Stores repo URL and passphrase locally for backup/restore helpers.
+# - Full-system backup of "/" with sensible excludes
+# - MySQL dumps of all non-system DBs to /var/backups/mysql/*.sql
+# - Excludes raw MySQL data directory (/var/lib/mysql) from Borg
+# - Auto-generates encryption passphrase and prints it at the end
+# - Stores repo URL + passphrase for restore helpers
 # - Daily backups at 08:30
 # - Retention: 7 daily, 4 weekly, 3 monthly
 #
@@ -60,7 +63,7 @@ if [[ -f "${BORG_PASSFILE}" ]]; then
   log "Existing Borg passphrase found at ${BORG_PASSFILE}, reusing."
 else
   log "Generating secure Borg passphrase..."
-  # 32-char random string, escape '-' and force C locale
+  # 32-char random string, safe characters, C locale
   GENERATED_PASSPHRASE="$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_\-+=' </dev/urandom | head -c 32 || true)"
 
   if [[ -z "${GENERATED_PASSPHRASE}" ]]; then
@@ -89,13 +92,20 @@ apt-get install -y -qq borgbackup sshpass
 BORG_BIN="$(command -v borg || echo /usr/bin/borg)"
 
 # -------------------------------------------------------------
+# PRE-ACCEPT STORAGE BOX HOST KEY (AVOID yes/no PROMPT)
+# -------------------------------------------------------------
+
+log "Adding Storage Box host key to known_hosts (if not present)..."
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+ssh-keyscan -p "${BOXPORT}" "${BOXHOST}" >> /root/.ssh/known_hosts 2>/dev/null || true
+
+# -------------------------------------------------------------
 # SSH KEY SETUP (HETZNER: USE -s, PASSWORD ONLY USED ONCE)
 # -------------------------------------------------------------
 
 if [[ ! -f /root/.ssh/id_rsa ]]; then
   log "Generating SSH key for root..."
-  mkdir -p /root/.ssh
-  chmod 700 /root/.ssh
   ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N "" >/dev/null
 else
   log "Existing SSH key found at /root/.ssh/id_rsa, reusing."
@@ -104,11 +114,8 @@ fi
 log "Copying SSH key to Storage Box with sshpass (Hetzner requires -s)..."
 sshpass -p "${BOXPASS}" ssh-copy-id -s -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" || true
 
-# We don't need the password anymore; clear it from memory
-unset BOXPASS
-
 # -------------------------------------------------------------
-# STORAGE BOX CONNECTION TEST - UPLOAD TEMP FILE
+# STORAGE BOX CONNECTION TEST - UPLOAD TEMP FILE (WITH SSHPASS)
 # -------------------------------------------------------------
 
 log "Testing Storage Box connectivity by uploading a test file..."
@@ -118,7 +125,7 @@ TESTFILE_REMOTE="test-upload-$(hostname)-$(date +%s).txt"
 
 echo "Storage Box test file created at $(date -Is)" > "${TESTFILE_LOCAL}"
 
-if scp -P "${BOXPORT}" "${TESTFILE_LOCAL}" "${BOXUSER}@${BOXHOST}:${TESTFILE_REMOTE}" >/dev/null 2>&1; then
+if sshpass -p "${BOXPASS}" scp -P "${BOXPORT}" "${TESTFILE_LOCAL}" "${BOXUSER}@${BOXHOST}:${TESTFILE_REMOTE}" >/dev/null 2>&1; then
   log "Test file upload SUCCESSFUL: ${TESTFILE_REMOTE}"
 else
   err "Test upload FAILED — cannot write to Storage Box!"
@@ -130,19 +137,21 @@ else
   exit 1
 fi
 
-ssh -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" "rm -f ${TESTFILE_REMOTE}" >/dev/null 2>&1 || true
+sshpass -p "${BOXPASS}" ssh -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" "rm -f ${TESTFILE_REMOTE}" >/dev/null 2>&1 || true
 rm -f "${TESTFILE_LOCAL}" || true
 
 log "Storage Box connectivity OK."
 
 # -------------------------------------------------------------
-# INIT BORG REPO (IDEMPOTENT, CREATE /backup/... IF NEEDED)
+# INIT BORG REPO (IDEMPOTENT, USING SSHPASS FOR FIRST RUN)
 # -------------------------------------------------------------
 
 log "Initializing (or verifying) Borg repository on Storage Box..."
 
 export BORG_PASSPHRASE
-if ! "${BORG_BIN}" init --encryption=repokey --make-parent-dirs "${REPOSITORY}" 2>/tmp/borg-init.log; then
+# Use sshpass for this initial init so no extra password prompts
+BORG_RSH_CMD="sshpass -p ${BOXPASS} ssh -p ${BOXPORT} -o StrictHostKeyChecking=no"
+if ! BORG_RSH="${BORG_RSH_CMD}" "${BORG_BIN}" init --encryption=repokey --make-parent-dirs "${REPOSITORY}" 2>/tmp/borg-init.log; then
   if grep -qi "already exists" /tmp/borg-init.log 2>/dev/null; then
     log "Borg repository already exists, continuing."
   else
@@ -151,10 +160,10 @@ if ! "${BORG_BIN}" init --encryption=repokey --make-parent-dirs "${REPOSITORY}" 
   fi
 fi
 rm -f /tmp/borg-init.log || true
-# Do NOT unset BORG_PASSPHRASE; we still want to print it later
+# Do NOT unset BORG_PASSPHRASE here, we still want to print it at the end
 
 # -------------------------------------------------------------
-# CREATE DAILY BACKUP SCRIPT
+# CREATE DAILY BACKUP SCRIPT (WITH MYSQL DUMPS)
 # -------------------------------------------------------------
 
 log "Creating /usr/local/bin/pre-upgrade-backup.sh ..."
@@ -163,11 +172,21 @@ mkdir -p /var/log/borg
 
 cat > /usr/local/bin/pre-upgrade-backup.sh << 'EOF'
 #!/usr/bin/env bash
+#
+# pre-upgrade-backup.sh
+#
+# - Dumps all non-system MySQL/MariaDB databases to /var/backups/mysql/*.sql
+# - Runs Borg full-system backup of "/" with sensible excludes
+# - Prunes old archives and compacts the repo
+#
+
 set -euo pipefail
 
 BORG_PASSFILE="/root/.borg-passphrase"
 REPO_FILE="/root/.borg-repository"
 LOG="/var/log/borg/backup.log"
+MYSQL_DUMP_DIR="/var/backups/mysql"
+MYSQL_DUMP_LOG="/var/log/mysql-dumps.log"
 BORG_BIN="$(command -v borg || echo /usr/bin/borg)"
 
 if [[ ! -f "$BORG_PASSFILE" ]]; then
@@ -187,10 +206,59 @@ mkdir -p "$(dirname "$LOG")"
 touch "$LOG"
 chmod 600 "$LOG"
 
+mkdir -p "$(dirname "$MYSQL_DUMP_LOG")"
+touch "$MYSQL_DUMP_LOG"
+chmod 600 "$MYSQL_DUMP_LOG"
+
+# ---------------------------------------------------------
+# Function: dump all non-system DBs to /var/backups/mysql
+# ---------------------------------------------------------
+do_mysql_dumps() {
+  echo "===== MySQL dump started at $(date -Is) =====" >> "$MYSQL_DUMP_LOG"
+
+  mkdir -p "$MYSQL_DUMP_DIR"
+  chmod 700 "$MYSQL_DUMP_DIR"
+
+  if ! command -v mysql >/dev/null 2>&1 || ! command -v mysqldump >/dev/null 2>&1; then
+    echo "[WARN] mysql or mysqldump not found, skipping DB dumps." >> "$MYSQL_DUMP_LOG"
+    echo "===== MySQL dump finished (skipped) at $(date -Is) =====" >> "$MYSQL_DUMP_LOG"
+    return 0
+  fi
+
+  set +e
+  DBS="$(mysql -N -B -e 'SHOW DATABASES;' 2>>"$MYSQL_DUMP_LOG")"
+  if [[ -z "$DBS" ]]; then
+    echo "[WARN] No databases returned by SHOW DATABASES; skipping DB dumps." >> "$MYSQL_DUMP_LOG"
+    echo "===== MySQL dump finished (no DBs) at $(date -Is) =====" >> "$MYSQL_DUMP_LOG"
+    set -e
+    return 0
+  fi
+
+  for db in $DBS; do
+    case "$db" in
+      information_schema|performance_schema|mysql|sys)
+        continue
+        ;;
+    esac
+    echo "[INFO] Dumping database: $db" >> "$MYSQL_DUMP_LOG"
+    mysqldump --single-transaction --quick --routines --events "$db" > "${MYSQL_DUMP_DIR}/${db}.sql" 2>>"$MYSQL_DUMP_LOG"
+    if [[ $? -ne 0 ]]; then
+      echo "[WARN] Failed to dump database: $db" >> "$MYSQL_DUMP_LOG"
+    fi
+  done
+  set -e
+
+  echo "===== MySQL dump finished at $(date -Is) =====" >> "$MYSQL_DUMP_LOG"
+}
+
 exec >> "$LOG" 2>&1
 
 echo "###### Backup started: $(date -Is) ######"
 
+# Step 1: DB dumps
+do_mysql_dumps
+
+# Step 2: Borg backup of "/" with excludes and MySQL data dir excluded
 "$BORG_BIN" create -v --stats \
   "$REPOSITORY::$(hostname)-{now:%Y-%m-%d_%H:%M}" \
   / \
@@ -204,11 +272,13 @@ echo "###### Backup started: $(date -Is) ######"
   --exclude /var/cache \
   --exclude /var/log/journal \
   --exclude /var/lib/lxcfs \
+  --exclude /var/lib/mysql \
   --exclude /mnt \
   --exclude /media \
   --exclude /lost+found \
   --exclude /swapfile
 
+# Step 3: prune & compact
 "$BORG_BIN" prune -v --list \
   --keep-daily=7 \
   --keep-weekly=4 \
@@ -239,12 +309,12 @@ BORG_PASSFILE="/root/.borg-passphrase"
 REPO_FILE="/root/.borg-repository"
 
 if [[ ! -f "$BORG_PASSFILE" ]]; then
-  echo "[ERROR] Passphrase file missing: $BORG_PASSFILE"
+  echo "[ERROR] Passphrase file missing: $BORG_PASSFILE" >&2
   exit 1
 fi
 
 if [[ ! -f "$REPO_FILE" ]]; then
-  echo "[ERROR] Repository file missing: $REPO_FILE"
+  echo "[ERROR] Repository file missing: $REPO_FILE" >&2
   exit 1
 fi
 
@@ -309,7 +379,11 @@ echo "The repository URL is stored at:    /root/.borg-repository"
 echo "You must save the above passphrase somewhere safe."
 echo
 
-log "Running borg-passphrase-test.sh to verify access..."
-/usr/local/bin/borg-passphrase-test.sh || err "Verification failed – check output above."
+log "Running borg-passphrase-test.sh to verify access (using ssh key; may prompt if key not working)..."
+# First verification run: prefer key auth; if it still prompts for password, you can fix SSH key later.
+ /usr/local/bin/borg-passphrase-test.sh || err "Verification failed – check output above."
+
+# Now we are done with the password; clear it from memory
+unset BOXPASS || true
 
 exit 0
