@@ -167,7 +167,6 @@ else
   echo "[-] sshd binary not found; please verify openssh-server installation." >&2
 fi
 
-
 # ----------------- Fail2Ban ----------------- #
 
 FAIL_JAIL="/etc/fail2ban/jail.local"
@@ -219,17 +218,17 @@ ufw allow 53/tcp    >/dev/null 2>&1 || true
 ufw allow 53/udp    >/dev/null 2>&1 || true
 
 # --- Mail Services ---
-ufw allow 25/tcp    >/dev/null 2>&1 || true
-ufw allow 465/tcp   >/dev/null 2>&1 || true
-ufw allow 587/tcp   >/dev/null 2>&1 || true
-ufw allow 110/tcp   >/dev/null 2>&1 || true
-ufw allow 995/tcp   >/dev/null 2>&1 || true
-ufw allow 143/tcp   >/dev/null 2>&1 || true
-ufw allow 993/tcp   >/dev/null 2>&1 || true
+ufw allow 25/tcp    >/dev/null 2>&1 || true   # SMTP
+ufw allow 465/tcp   >/dev/null 2>&1 || true   # SMTPS
+ufw allow 587/tcp   >/dev/null 2>&1 || true   # Submission
+ufw allow 110/tcp   >/dev/null 2>&1 || true   # POP3
+ufw allow 995/tcp   >/dev/null 2>&1 || true   # POP3S
+ufw allow 143/tcp   >/dev/null 2>&1 || true   # IMAP
+ufw allow 993/tcp   >/dev/null 2>&1 || true   # IMAPS
 
 # --- FTP + Passive FTP ---
-ufw allow 21/tcp           >/dev/null 2>&1 || true
-ufw allow 40110:40210/tcp  >/dev/null 2>&1 || true
+ufw allow 21/tcp           >/dev/null 2>&1 || true       # FTP control
+ufw allow 40110:40210/tcp  >/dev/null 2>&1 || true       # Passive FTP range
 
 # --- Default Policies ---
 ufw default deny incoming  >/dev/null 2>&1 || true
@@ -237,34 +236,6 @@ ufw default allow outgoing >/dev/null 2>&1 || true
 
 log "Enabling firewall..."
 ufw --force enable >/dev/null 2>&1 || true
-
-# --- Mail Services ---
-
-# SMTP
-ufw allow 25/tcp   >/dev/null 2>&1 || true   # outbound often enough; inbound if you're receiving mail directly
-ufw allow 465/tcp  >/dev/null 2>&1 || true   # SMTPS
-ufw allow 587/tcp  >/dev/null 2>&1 || true   # Submission
-
-# POP3 / IMAP
-ufw allow 110/tcp  >/dev/null 2>&1 || true   # POP3
-ufw allow 995/tcp  >/dev/null 2>&1 || true   # POP3S
-ufw allow 143/tcp  >/dev/null 2>&1 || true   # IMAP
-ufw allow 993/tcp  >/dev/null 2>&1 || true   # IMAPS
-
-# --- FTP + Passive FTP ---
-
-ufw allow 21/tcp        >/dev/null 2>&1 || true           # FTP control
-ufw allow 40110:40210/tcp >/dev/null 2>&1 || true         # Passive FTP range (must match FTP config)
-
-# --- Default Policies ---
-
-ufw default deny incoming  >/dev/null 2>&1 || true
-ufw default allow outgoing >/dev/null 2>&1 || true
-
-log "Enabling firewall..."
-ufw --force enable >/dev/null 2>&1 || true
-
-
 
 # ----------------- ClamAV ----------------- #
 
