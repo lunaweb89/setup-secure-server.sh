@@ -33,7 +33,6 @@ read -rp "Storage Box hostname (e.g. u123456.your-storagebox.de): " BOXHOST
 read -rp "Storage Box SSH port (default 23): " BOXPORT
 BOXPORT="${BOXPORT:-23}"
 
-# Repository directory on the Storage Box, under /backups/
 DEFAULT_REPO_DIR="server-$(hostname)"
 read -rp "Repository directory under /backups/ [${DEFAULT_REPO_DIR}]: " REPO_DIR
 REPO_DIR="${REPO_DIR:-$DEFAULT_REPO_DIR}"
@@ -43,26 +42,43 @@ if [[ -z "${BOXUSER}" || -z "${BOXHOST}" ]]; then
   exit 1
 fi
 
-echo
-echo "Borg will use encryption=repokey as recommended by Hetzner."
-echo "For automation, the passphrase will be stored in the local backup script."
-echo "Use a passphrase with NO spaces or quotes to keep things simple."
-read -rsp "Enter Borg repository passphrase: " BORG_PASSPHRASE
-echo
-if [[ -z "${BORG_PASSPHRASE}" ]]; then
-  err "Borg passphrase cannot be empty."
-  exit 1
+REPOSITORY="ssh://${BOXUSER}@${BOXHOST}:${BOXPORT}/./backups/${REPO_DIR}"
+log "Borg repository will be: ${REPOSITORY}"
+
+# -------------------------------------------------------------
+# BORG PASSPHRASE HANDLING (NOT IN GIT)
+# -------------------------------------------------------------
+
+# Passphrase file will live only on the server
+BORG_PASSFILE="/root/.borg-passphrase"
+
+if [[ -f "${BORG_PASSFILE}" ]]; then
+  log "Existing Borg passphrase file found at ${BORG_PASSFILE}, reusing."
+else
+  echo
+  echo "Borg will use encryption=repokey (recommended)."
+  echo "Passphrase will be stored locally at ${BORG_PASSFILE} (root-only)."
+  echo "Do NOT use spaces or quotes to keep things simple."
+  read -rsp "Enter Borg repository passphrase: " BORG_PASSPHRASE
+  echo
+  if [[ -z "${BORG_PASSPHRASE}" ]]; then
+    err "Borg passphrase cannot be empty."
+    exit 1
+  fi
+
+  echo "${BORG_PASSPHRASE}" > "${BORG_PASSFILE}"
+  chmod 600 "${BORG_PASSFILE}"
+  log "Saved Borg passphrase to ${BORG_PASSFILE} (root-only)."
 fi
 
-REPOSITORY="ssh://${BOXUSER}@${BOXHOST}:${BOXPORT}/./backups/${REPO_DIR}"
-
-log "Borg repository will be: ${REPOSITORY}"
+# Always load it into env when needed
+BORG_PASSPHRASE="$(<"${BORG_PASSFILE}")"
 
 # -------------------------------------------------------------
 # INSTALL REQUIRED PACKAGES
 # -------------------------------------------------------------
 
-log "Installing BorgBackup and unattended-upgrades..."
+log "Installing BorgBackup and unattended-upgrades (if not present)..."
 apt-get update -qq
 apt-get install -y -qq borgbackup unattended-upgrades
 
@@ -90,9 +106,7 @@ ssh-copy-id -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
 
 log "Initializing (or verifying) Borg repository on Storage Box..."
 
-export BORG_PASSPHRASE="${BORG_PASSPHRASE}"
-
-# init will succeed once, then fail with 'already exists', which we treat as OK
+export BORG_PASSPHRASE
 if ! "${BORG_BIN}" init --encryption=repokey "${REPOSITORY}" 2>/tmp/borg-init.log; then
   if grep -qi "already exists" /tmp/borg-init.log 2>/dev/null; then
     log "Borg repository already exists, continuing."
@@ -102,6 +116,7 @@ if ! "${BORG_BIN}" init --encryption=repokey "${REPOSITORY}" 2>/tmp/borg-init.lo
   fi
 fi
 rm -f /tmp/borg-init.log || true
+unset BORG_PASSPHRASE
 
 # -------------------------------------------------------------
 # CREATE BACKUP SCRIPT (Hetzner-style)
@@ -115,11 +130,13 @@ cat > /usr/local/bin/pre-upgrade-backup.sh <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-##
-## Environment & configuration
-##
+BORG_PASSFILE="/root/.borg-passphrase"
+if [[ ! -f "\$BORG_PASSFILE" ]]; then
+  echo "[\$(date -Is)] Borg passphrase file \$BORG_PASSFILE not found, aborting." >&2
+  exit 1
+fi
 
-export BORG_PASSPHRASE='${BORG_PASSPHRASE}'
+export BORG_PASSPHRASE="\$(<"\$BORG_PASSFILE")"
 REPOSITORY="${REPOSITORY}"
 LOG='/var/log/borg/backup.log'
 BORG_BIN="\$(command -v borg || echo /usr/bin/borg)"
@@ -132,13 +149,8 @@ exec >> "\$LOG" 2>&1
 
 echo "###### Backup started: \$(date -Is) ######"
 
-##
-## Here you could insert pre-backup tasks, e.g. DB dumps, package lists, etc.
-##
-
 echo "Transfer files with Borg..."
 
-# Full system backup as per Hetzner docs, with common excludes
 "\$BORG_BIN" create -v --stats \\
     "\$REPOSITORY::\{now:%Y-%m-%d_%H:%M\}" \\
     / \\
@@ -153,7 +165,6 @@ echo "Transfer files with Borg..."
 
 echo "Borg create finished at \$(date -Is)"
 
-# Retention: keep last 30 daily backups, then compact to free space
 "\$BORG_BIN" prune -v --list --keep-daily=30 "\$REPOSITORY"
 "\$BORG_BIN" compact "\$REPOSITORY" || true
 
