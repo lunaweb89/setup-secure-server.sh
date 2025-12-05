@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 #
-# restore-backup.sh
-#
-# Safely restore a Borg archive from your Hetzner Storage Box.
-# - Reads repo + passphrase from:
-#     /root/.borg-repository
-#     /root/.borg-passphrase
-# - Lists archives and lets you pick one by number
-# - Restores into /restore/<archive-name> (non-destructive)
-# - Shows archive info, progress, and a rough estimated restore time
+# restore-backup.sh – Safe Borg restore with auto-increment restore directory
 #
 
 set -euo pipefail
@@ -46,9 +38,9 @@ echo
 # Fetch archive list
 # -------------------------------------------------------------
 
-log "Fetching archive list from repository..."
+log "Fetching archive list..."
 if ! borg list --short "$REPOSITORY" > /tmp/borg-archives.$$; then
-  err "Failed to list archives. Check passphrase or connectivity."
+  err "Cannot list archives. Incorrect passphrase or connectivity issue."
   rm -f /tmp/borg-archives.$$
   exit 1
 fi
@@ -57,7 +49,7 @@ mapfile -t ARCHIVES < /tmp/borg-archives.$$
 rm -f /tmp/borg-archives.$$
 
 if (( ${#ARCHIVES[@]} == 0 )); then
-  err "No archives found in repository."
+  err "No archives found."
   exit 1
 fi
 
@@ -67,128 +59,70 @@ for i in "${!ARCHIVES[@]}"; do
 done
 echo
 
-# -------------------------------------------------------------
-# Select archive
-# -------------------------------------------------------------
+read -rp "Select archive number (or q to quit): " CHOICE
+if [[ "$CHOICE" =~ ^[Qq]$ ]]; then exit 0; fi
+if ! [[ "$CHOICE" =~ ^[0-9]+$ ]]; then err "Invalid choice."; exit 1; fi
 
-read -rp "Select archive number to restore (or 'q' to quit): " CHOICE
+INDEX=$((CHOICE - 1))
+if (( INDEX < 0 || INDEX >= ${#ARCHIVES[@]} )); then err "Out of range."; exit 1; fi
 
-if [[ "$CHOICE" =~ ^[Qq]$ ]]; then
-  echo "[*] Aborted by user."
-  exit 0
-fi
+ARCHIVE="${ARCHIVES[$INDEX]}"
 
-if ! [[ "$CHOICE" =~ ^[0-9]+$ ]]; then
-  err "Invalid selection."
-  exit 1
-fi
-
-INDEX=$((CHOICE-1))
-
-if (( INDEX < 0 || INDEX >= ${#ARCHIVES[@]} )); then
-  err "Selection out of range."
-  exit 1
-fi
-
-ARCHIVE="${ARCHIVES[INDEX]}"
-echo
-log "Selected archive: $ARCHIVE"
+log "Selected: $ARCHIVE"
 echo
 
 # -------------------------------------------------------------
-# Show archive info + estimate restore time (if possible)
+# Base restore directory
 # -------------------------------------------------------------
 
-EST_SIZE_BYTES=""
-EST_SPEED_MB=40   # assumed effective throughput (MB/s) for rough ETA
+read -rp "Base restore directory [/restore]: " BASE
+BASE="${BASE:-/restore}"
+BASE="${BASE%/}"
 
-echo "[*] Getting archive info (size, dates)..."
-if borg info --json "$REPOSITORY::$ARCHIVE" > /tmp/borg-archive-info.$$ 2>/dev/null; then
-  if command -v python3 >/dev/null 2>&1; then
-    EST_SIZE_BYTES="$(python3 - "$EST_SPEED_MB" << 'PYEOF'
-import sys, json
-data = json.load(open("/tmp/borg-archive-info.$$"))
-arch = data.get("archives", [{}])[0]
-size = arch.get("stats", {}).get("compressed_size") or arch.get("stats", {}).get("original_size")
-if size is not None:
-    print(size)
-PYEOF
-)"
-  fi
+TARGET="${BASE}/${ARCHIVE}"
 
-  echo
-  echo "Archive info:"
-  borg info "$REPOSITORY::$ARCHIVE" || true
-  echo
-else
-  echo "[!] borg info --json not available or failed; skipping detailed info."
+# -------------------------------------------------------------
+# Auto-increment target directory if exists
+# -------------------------------------------------------------
+
+if [[ -e "$TARGET" ]]; then
+  log "Target exists, choosing next available name..."
+
+  n=1
+  NEW_TARGET="${TARGET}-${n}"
+
+  while [[ -e "$NEW_TARGET" ]]; do
+    n=$((n+1))
+    NEW_TARGET="${TARGET}-${n}"
+  done
+
+  TARGET="$NEW_TARGET"
 fi
 
-rm -f /tmp/borg-archive-info.$$ 2>/dev/null || true
-
-if [[ -n "${EST_SIZE_BYTES:-}" && "$EST_SIZE_BYTES" =~ ^[0-9]+$ ]]; then
-  # size in MB (decimal)
-  EST_SIZE_MB=$((EST_SIZE_BYTES / 1024 / 1024))
-  # estimated seconds at EST_SPEED_MB MB/s
-  if (( EST_SIZE_MB > 0 )); then
-    EST_SECONDS=$((EST_SIZE_MB / EST_SPEED_MB + 1))
-    EST_MIN=$((EST_SECONDS / 60))
-    EST_SEC=$((EST_SECONDS % 60))
-    echo "[*] Approx archive compressed size: ~${EST_SIZE_MB} MB"
-    echo "[*] Rough restore time estimate at ${EST_SPEED_MB} MB/s: ~${EST_MIN} min ${EST_SEC} s"
-  fi
-fi
-
-echo
+log "Restore directory will be: $TARGET"
+mkdir -p "$TARGET"
 
 # -------------------------------------------------------------
-# Choose restore path
+# Extract archive
 # -------------------------------------------------------------
 
-read -rp "Base restore directory [/restore]: " BASE_RESTORE
-BASE_RESTORE="${BASE_RESTORE:-/restore}"
+log "Starting restore…"
+cd "$TARGET"
 
-# normalize
-BASE_RESTORE="${BASE_RESTORE%/}"
-
-RESTORE_DIR="${BASE_RESTORE}/${ARCHIVE}"
-
-log "Restore target: $RESTORE_DIR"
-if [[ -e "$RESTORE_DIR" ]]; then
-  err "Target path already exists: $RESTORE_DIR"
-  err "Remove it or choose a different base directory and try again."
-  exit 1
-fi
-
-mkdir -p "$BASE_RESTORE"
-mkdir "$RESTORE_DIR"
-
-# -------------------------------------------------------------
-# Extract archive (with progress)
-# -------------------------------------------------------------
-
-echo
-log "Starting restore into: $RESTORE_DIR"
-echo "[*] This may take a while. Showing file-level progress (--list)..."
-echo
-
-START_TS=$(date +%s)
-
-# Extract into restore dir by changing into it first
-cd "$RESTORE_DIR"
+START=$(date +%s)
 
 if borg extract --list "$REPOSITORY::$ARCHIVE"; then
-  END_TS=$(date +%s)
-  DURATION=$((END_TS - START_TS))
-  MIN=$((DURATION / 60))
-  SEC=$((DURATION % 60))
+  END=$(date +%s)
+  DUR=$((END - START))
+  MIN=$((DUR / 60))
+  SEC=$((DUR % 60))
 
   echo
-  echo "[SUCCESS] Archive restored to: $RESTORE_DIR"
-  echo "[INFO] Actual restore time: ${MIN} min ${SEC} s"
-  echo "You can safely inspect files there without touching the live system."
+  log "Restore completed successfully!"
+  log "Restored to: $TARGET"
+  echo "[INFO] Time taken: ${MIN}m ${SEC}s"
 else
-  err "borg extract failed."
+  err "Restore failed."
   exit 1
 fi
 
