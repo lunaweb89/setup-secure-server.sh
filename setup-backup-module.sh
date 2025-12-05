@@ -60,7 +60,8 @@ if [[ -f "${BORG_PASSFILE}" ]]; then
 else
   log "Generating secure Borg passphrase..."
   # 32-character random string from /dev/urandom (no openssl dependency)
-  GENERATED_PASSPHRASE="$(tr -dc 'A-Za-z0-9!@#$%^&*_-+=' </dev/urandom | head -c 32 || true)"
+  GENERATED_PASSPHRASE="$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_\-+=' </dev/urandom | head -c 32 || true)"
+
 
   if [[ -z "${GENERATED_PASSPHRASE}" ]]; then
     err "Failed to generate random passphrase."
