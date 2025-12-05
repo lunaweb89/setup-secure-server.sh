@@ -3,109 +3,232 @@
 # setup-backup-module.sh
 #
 # Adds BorgBackup + Hetzner Storage Box weekly backups,
-# weekly safe-upgrades, and safe reboot logic.
+# weekly safe-upgrades, and simple safety logic.
+#
+# Usage:
+#   sudo bash setup-backup-module.sh
+#
 
-set -u
+set -euo pipefail
 
 log() { echo "[+] $*"; }
+err() { echo "[-] $*" >&2; }
+
+require_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    err "This script must be run as root (use sudo)."
+    exit 1
+  fi
+}
+
+require_root
 
 # -------------------------------------------------------------
 # PROMPT FOR STORAGE BOX DETAILS
 # -------------------------------------------------------------
 
-echo "===== Hetzner Storage Box Backup Setup ====="
+echo "===== Hetzner Storage Box Backup Setup (Borg) ====="
 read -rp "Storage Box username (e.g. u123456): " BOXUSER
 read -rp "Storage Box hostname (e.g. u123456.your-storagebox.de): " BOXHOST
 read -rp "Storage Box SSH port (default 23): " BOXPORT
 BOXPORT="${BOXPORT:-23}"
 
+# Repository directory on the Storage Box, under /backups/
+DEFAULT_REPO_DIR="server-$(hostname)"
+read -rp "Repository directory under /backups/ [${DEFAULT_REPO_DIR}]: " REPO_DIR
+REPO_DIR="${REPO_DIR:-$DEFAULT_REPO_DIR}"
+
+if [[ -z "${BOXUSER}" || -z "${BOXHOST}" ]]; then
+  err "Storage Box username and hostname are required."
+  exit 1
+fi
+
+echo
+echo "Borg will use encryption=repokey as recommended by Hetzner."
+echo "For automation, the passphrase will be stored in the local backup script."
+echo "Use a passphrase with NO spaces or quotes to keep things simple."
+read -rsp "Enter Borg repository passphrase: " BORG_PASSPHRASE
+echo
+if [[ -z "${BORG_PASSPHRASE}" ]]; then
+  err "Borg passphrase cannot be empty."
+  exit 1
+fi
+
+REPOSITORY="ssh://${BOXUSER}@${BOXHOST}:${BOXPORT}/./backups/${REPO_DIR}"
+
+log "Borg repository will be: ${REPOSITORY}"
+
 # -------------------------------------------------------------
 # INSTALL REQUIRED PACKAGES
 # -------------------------------------------------------------
 
-log "Installing BorgBackup + SSHFS..."
+log "Installing BorgBackup and unattended-upgrades..."
 apt-get update -qq
-apt-get install -y -qq borgbackup sshfs
+apt-get install -y -qq borgbackup unattended-upgrades
+
+BORG_BIN="$(command -v borg || echo /usr/bin/borg)"
 
 # -------------------------------------------------------------
 # SSH KEY SETUP
 # -------------------------------------------------------------
 
 if [[ ! -f /root/.ssh/id_rsa ]]; then
-  log "Generating SSH key..."
+  log "Generating SSH key for root..."
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
   ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N "" >/dev/null
+else
+  log "Existing SSH key found at /root/.ssh/id_rsa, reusing."
 fi
 
-log "Copying SSH key to Storage Box..."
-ssh-copy-id -p "$BOXPORT" "$BOXUSER@$BOXHOST"
+log "Copying SSH key to Storage Box (may prompt for password)..."
+ssh-copy-id -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
 
 # -------------------------------------------------------------
-# DETECT ROOT FILESYSTEM DEVICE
+# INIT BORG REPO (idempotent, encryption=repokey)
 # -------------------------------------------------------------
 
-ROOTDEV="$(findmnt -n -o SOURCE /)"
-log "Detected root filesystem device: $ROOTDEV"
+log "Initializing (or verifying) Borg repository on Storage Box..."
+
+export BORG_PASSPHRASE="${BORG_PASSPHRASE}"
+
+# init will succeed once, then fail with 'already exists', which we treat as OK
+if ! "${BORG_BIN}" init --encryption=repokey "${REPOSITORY}" 2>/tmp/borg-init.log; then
+  if grep -qi "already exists" /tmp/borg-init.log 2>/dev/null; then
+    log "Borg repository already exists, continuing."
+  else
+    err "borg init failed. Check /tmp/borg-init.log"
+    exit 1
+  fi
+fi
+rm -f /tmp/borg-init.log || true
 
 # -------------------------------------------------------------
-# INIT BORG REPO (idempotent)
+# CREATE BACKUP SCRIPT (Hetzner-style)
 # -------------------------------------------------------------
 
-log "Initializing Storage Box Borg repository..."
-ssh -p "$BOXPORT" "$BOXUSER@$BOXHOST" "borg init --make-parent-dirs --encryption=none repo" || true
+log "Creating /usr/local/bin/pre-upgrade-backup.sh ..."
 
-# -------------------------------------------------------------
-# CREATE BACKUP SCRIPT
-# -------------------------------------------------------------
+mkdir -p /var/log/borg
 
 cat > /usr/local/bin/pre-upgrade-backup.sh <<EOF
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-LOG=/var/log/borg-backup.log
-echo "===== Backup started at \$(date) =====" >> \$LOG
+##
+## Environment & configuration
+##
 
-borg create --verbose --stats --compression zstd \
-  ${BOXUSER}@${BOXHOST}:repo::server-\$(hostname)-\$(date +%Y-%m-%d_%H-%M-%S) \
-  / \
-  --exclude /dev --exclude /proc --exclude /sys --exclude /tmp \
-  --exclude /run --exclude /mnt --exclude /media --exclude /lost+found \
-  >> \$LOG 2>&1
+export BORG_PASSPHRASE='${BORG_PASSPHRASE}'
+REPOSITORY="${REPOSITORY}"
+LOG='/var/log/borg/backup.log'
+BORG_BIN="\$(command -v borg || echo /usr/bin/borg)"
 
-borg prune --keep-daily=30 ${BOXUSER}@${BOXHOST}:repo >> \$LOG 2>&1
+mkdir -p /var/log/borg
+touch "\$LOG"
+chmod 600 "\$LOG"
 
+exec >> "\$LOG" 2>&1
+
+echo "###### Backup started: \$(date -Is) ######"
+
+##
+## Here you could insert pre-backup tasks, e.g. DB dumps, package lists, etc.
+##
+
+echo "Transfer files with Borg..."
+
+# Full system backup as per Hetzner docs, with common excludes
+"\$BORG_BIN" create -v --stats \\
+    "\$REPOSITORY::\{now:%Y-%m-%d_%H:%M\}" \\
+    / \\
+    --exclude /dev \\
+    --exclude /proc \\
+    --exclude /sys \\
+    --exclude /var/run \\
+    --exclude /run \\
+    --exclude /lost+found \\
+    --exclude /mnt \\
+    --exclude /var/lib/lxcfs
+
+echo "Borg create finished at \$(date -Is)"
+
+# Retention: keep last 30 daily backups, then compact to free space
+"\$BORG_BIN" prune -v --list --keep-daily=30 "\$REPOSITORY"
+"\$BORG_BIN" compact "\$REPOSITORY" || true
+
+mkdir -p /var/run
 touch /var/run/backup-ok
-echo "===== Backup completed successfully =====" >> \$LOG
+
+echo "###### Backup ended: \$(date -Is) ######"
 EOF
 
-chmod +x /usr/local/bin/pre-upgrade-backup.sh
+chmod 700 /usr/local/bin/pre-upgrade-backup.sh
 
 # -------------------------------------------------------------
-# WEEKLY BACKUP + WEEKLY SAFE UPGRADE + SAFE REBOOT
+# CREATE WEEKLY SAFE-UPGRADE WRAPPER
 # -------------------------------------------------------------
 
-log "Configuring weekly Sunday backup and upgrade..."
+log "Creating /usr/local/bin/weekly-safe-upgrade.sh ..."
+
+cat > /usr/local/bin/weekly-safe-upgrade.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG=/var/log/auto-security-updates.log
+mkdir -p /var/log
+touch "$LOG"
+chmod 600 "$LOG"
+
+if [[ ! -f /var/run/backup-ok ]]; then
+  echo "[$(date -Is)] weekly-safe-upgrade: backup-ok flag missing, aborting." >> "$LOG"
+  exit 0
+fi
+
+if ! command -v unattended-upgrade >/dev/null 2>&1; then
+  echo "[$(date -Is)] weekly-safe-upgrade: unattended-upgrade not installed, aborting." >> "$LOG"
+  exit 0
+fi
+
+echo "===== Weekly unattended-upgrade started at $(date -Is) =====" >> "$LOG"
+if unattended-upgrade -v >> "$LOG" 2>&1; then
+  echo "===== Weekly unattended-upgrade finished SUCCESSFULLY at $(date -Is) =====" >> "$LOG"
+  rm -f /var/run/backup-ok
+else
+  echo "===== Weekly unattended-upgrade FAILED at $(date -Is) =====" >> "$LOG"
+fi
+EOF
+
+chmod 700 /usr/local/bin/weekly-safe-upgrade.sh
+
+# -------------------------------------------------------------
+# WEEKLY BACKUP + WEEKLY SAFE UPGRADE CRONS
+# -------------------------------------------------------------
+
+log "Configuring weekly Sunday backup and upgrade cronjobs..."
 
 cat > /etc/cron.d/weekly-backup <<EOF
+# Weekly full-system Borg backup to Hetzner Storage Box
 0 12 * * 0 root /usr/local/bin/pre-upgrade-backup.sh
 EOF
 
-cat > /etc/cron.d/weekly-upgrade <<'EOF'
-0 14 * * 0 root [ -f /var/run/backup-ok ] && unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1 && rm -f /var/run/backup-ok
+cat > /etc/cron.d/weekly-upgrade <<EOF
+# Weekly unattended-upgrade, only if backup succeeded
+0 14 * * 0 root /usr/local/bin/weekly-safe-upgrade.sh
 EOF
 
+chmod 644 /etc/cron.d/weekly-backup /etc/cron.d/weekly-upgrade
+
 # -------------------------------------------------------------
-# TEST UPLOAD
+# SIMPLE HETZNER-STYLE REMOTE TEST
 # -------------------------------------------------------------
 
-TESTFILE="/tmp/storagebox-test-\$(date +%s).txt"
-echo "Storage Box test upload successful at \$(date)" > "\$TESTFILE"
+log "Testing Borg remote access on Storage Box (borg --version)..."
 
-scp -P "$BOXPORT" "\$TESTFILE" "${BOXUSER}@${BOXHOST}:test-upload.txt"
-
-if [[ $? -eq 0 ]]; then
-  echo "[+] Storage Box test upload SUCCESSFUL."
+if ssh -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" "borg --version" >/dev/null 2>&1; then
+  log "Borg remote test SUCCESSFUL (borg --version)."
 else
-  echo "[-] Storage Box test upload FAILED."
+  err "Borg remote test FAILED. Check that Borg is enabled on the Storage Box and SSH support is active."
 fi
 
 # -------------------------------------------------------------
