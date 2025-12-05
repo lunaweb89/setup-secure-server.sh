@@ -91,6 +91,36 @@ log "Copying SSH key to Storage Box (may prompt for password)..."
 ssh-copy-id -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
 
 # -------------------------------------------------------------
+# STORAGE BOX CONNECTION TEST - UPLOAD TEMP FILE
+# -------------------------------------------------------------
+
+log "Testing Storage Box connectivity by uploading a test file..."
+
+TESTFILE_LOCAL="/tmp/storagebox-test-$(date +%s).txt"
+TESTFILE_REMOTE="test-upload-$(hostname)-$(date +%s).txt"
+
+echo "Storage Box test file created at $(date -Is)" > "$TESTFILE_LOCAL"
+
+if scp -P "${BOXPORT}" "$TESTFILE_LOCAL" "${BOXUSER}@${BOXHOST}:${TESTFILE_REMOTE}" >/dev/null 2>&1; then
+  log "Test file upload SUCCESSFUL: ${TESTFILE_REMOTE}"
+else
+  err "Test upload FAILED — cannot write to Storage Box!"
+  err "Check:"
+  err " - Credentials"
+  err " - SSH port (${BOXPORT})"
+  err " - Network firewall rules"
+  err " - Storage Box SSH access enabled"
+  exit 1
+fi
+
+# Optional: remove test file from remote
+ssh -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" "rm -f ${TESTFILE_REMOTE}" >/dev/null 2>&1 || true
+
+rm -f "$TESTFILE_LOCAL" || true
+
+log "Storage Box connectivity OK."
+
+# -------------------------------------------------------------
 # INIT BORG REPO (idempotent)
 # -------------------------------------------------------------
 
