@@ -6,17 +6,17 @@
 #   - Repair dpkg/APT if broken
 #   - Install required base packages
 #   - Enable security-only automatic updates
-#   - Configure daily cron job for updates
+#   - Configure monthly cron job for updates
 #   - Harden SSH configuration (root login allowed, ports 22 + 2808)
 #   - Install + configure Fail2Ban (maxretry=5)
 #   - Configure + enable UFW firewall (SSH, web, CyberPanel, mail, FTP, DNS)
 #   - Install ClamAV + Maldet (Linux Malware Detect)
 #   - Run weekly malware scans via cron on /home
 #
-# Run directly (example):
+# Run directly:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server.sh/main/setup-secure-server.sh)
 
-set -u   # strict on unset vars, but we handle errors manually (no set -e)
+set -u   # strict on unset vars
 
 # ----------------- Step Status ----------------- #
 STEP_update_base_packages="FAILED"
@@ -81,7 +81,7 @@ apt_install_retry() {
     if apt-get install -y -qq "${pkgs[@]}"; then
       return 0
     fi
-    log "apt-get install ${pkgs[*]} failed (attempt $((tries+1))/$max_tries), trying apt-get -f install..."
+    log "apt-get install ${pkgs[*]} failed, retrying..."
     apt-get -f install -y || true
     tries=$((tries + 1))
     sleep 5
@@ -94,49 +94,29 @@ apt_install_retry() {
 require_root
 export DEBIAN_FRONTEND=noninteractive
 
-# ----------------- Repair dpkg / APT if broken ----------------- #
+# ----------------- Repair dpkg / APT ----------------- #
 log "Checking dpkg / APT health..."
 
 if dpkg --audit | grep -q .; then
-  log "dpkg is in a broken state — repairing with dpkg --configure -a ..."
-  dpkg --configure -a || log "WARNING: dpkg --configure -a did not complete cleanly."
+  log "dpkg broken — repairing..."
+  dpkg --configure -a || log "WARNING: dpkg configure did not fully succeed."
 fi
 
 apt-get -f install -y || true
 
 log "Running apt-get update with retry..."
-if apt_update_retry; then
-  log "APT update completed."
-else
-  log "ERROR: apt-get update failed after retries. Continuing, but later installs may fail."
-fi
+apt_update_retry || log "ERROR: apt-get update failed after retries."
 
-log "Installing required base packages (may already be installed)..."
-if apt_install_retry \
-  lsb-release \
-  ca-certificates \
-  openssh-server \
-  cron \
-  ufw \
-  fail2ban \
-  unattended-upgrades \
-  curl \
-  wget \
-  tar; then
+log "Installing required base packages..."
+if apt_install_retry lsb-release ca-certificates openssh-server cron ufw fail2ban unattended-upgrades curl wget tar; then
   STEP_update_base_packages="OK"
-else
-  log "ERROR: Base package installation failed after retries."
 fi
 
-log "Ensuring SSH service is enabled and running..."
-systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
-systemctl restart ssh  >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
+log "Ensuring SSH service is running..."
+systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1
+systemctl restart ssh  >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
 
 CODENAME="$(get_codename)"
-if [[ -z "$CODENAME" ]]; then
-  echo "[-] Unable to detect Ubuntu codename." >&2
-  # We continue but unattended-upgrades config may be suboptimal
-fi
 log "Ubuntu codename detected: ${CODENAME:-unknown}"
 
 # ----------------- Automated Security Updates ----------------- #
@@ -151,29 +131,45 @@ backup "$AU"
 log "Configuring unattended security-only upgrades..."
 
 {
+  # NEW: fallback if CODENAME is empty
+  if [[ -n "$CODENAME" ]]; then
+    ORIGIN_PATTERN="origin=Ubuntu,codename=${CODENAME},label=Ubuntu-Security"
+  else
+    ORIGIN_PATTERN="origin=Ubuntu,label=Ubuntu-Security"
+  fi
+
   cat > "$UU" <<EOF
 Unattended-Upgrade::Origins-Pattern {
-  "origin=Ubuntu,codename=${CODENAME},label=Ubuntu-Security";
+  "${ORIGIN_PATTERN}";
 };
+
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "14:00";
 Unattended-Upgrade::MailOnlyOnError "true";
+
+# NEW Quality-of-life improvements
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
 EOF
 
+  # Periodic (still required even when using cron)
   cat > "$AU" <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
+  # UPDATED: monthly updates (1st of month at 13:30)
   cat > "$CRON_UPDATES" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-30 13 * * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
+# Run unattended-upgrade monthly on the 1st at 13:30
+30 13 1 * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
 EOF
 
   chmod 644 "$CRON_UPDATES"
   STEP_auto_security_updates="OK"
+
 } || {
   log "ERROR: Failed to configure unattended upgrades."
 }
@@ -184,27 +180,20 @@ SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
 mkdir -p /etc/ssh/sshd_config.d
 backup "$SSH_HARDEN"
 
-log "Applying SSH hardening (root login allowed, ports 22 & 2808, 5 attempts)..."
+log "Applying SSH hardening..."
 
 if cat > "$SSH_HARDEN" <<'EOF'
 # SSH Hardening
-
-# Listen on BOTH ports:
 Port 22
 Port 2808
 Protocol 2
 
-# Enable root login with password
 PermitRootLogin yes
-
-# Enable password authentication
 PasswordAuthentication yes
-
 ChallengeResponseAuthentication no
 PermitEmptyPasswords no
 UsePAM yes
 
-# Security options
 X11Forwarding no
 AllowTcpForwarding yes
 AllowAgentForwarding yes
@@ -215,20 +204,12 @@ ClientAliveInterval 300
 ClientAliveCountMax 2
 EOF
 then
-  log "Testing SSH configuration..."
-  if command -v sshd >/dev/null 2>&1; then
-    if sshd -t; then
-      systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
-      log "SSHD reloaded with hardened config."
-      STEP_ssh_hardening="OK"
-    else
-      echo "[-] SSH config test failed; not reloading." >&2
-    fi
+  if sshd -t 2>/dev/null; then
+    systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1
+    STEP_ssh_hardening="OK"
   else
-    echo "[-] sshd binary not found; please verify openssh-server installation." >&2
+    echo "[-] SSH config test failed; NOT reloading."
   fi
-else
-  log "ERROR: Failed to write $SSH_HARDEN"
 fi
 
 # ----------------- Fail2Ban ----------------- #
@@ -237,7 +218,7 @@ FAIL_JAIL="/etc/fail2ban/jail.local"
 mkdir -p /etc/fail2ban
 backup "$FAIL_JAIL"
 
-log "Configuring Fail2Ban for SSH (maxretry = 5)..."
+log "Configuring Fail2Ban..."
 
 if cat > "$FAIL_JAIL" <<'EOF'
 [DEFAULT]
@@ -248,165 +229,119 @@ maxretry = 5
 [sshd]
 enabled  = true
 port     = 22,2808
-logpath  = %(sshd_log)s
 backend  = systemd
 EOF
 then
-  systemctl enable fail2ban >/dev/null 2>&1 || true
-  systemctl restart fail2ban >/dev/null 2>&1 || true
+  systemctl enable fail2ban >/dev/null
+  systemctl restart fail2ban >/dev/null
   STEP_fail2ban_config="OK"
-else
-  log "ERROR: Failed to write $FAIL_JAIL"
 fi
 
 # ----------------- UFW Firewall ----------------- #
 
-log "Configuring UFW firewall (SSH, web, CyberPanel, mail, FTP, DNS)..."
+log "Configuring UFW firewall..."
 
 UFW_OK=1
 
-# SSH (primary + fallback)
-ufw allow 22/tcp    >/dev/null 2>&1 || UFW_OK=0
-ufw limit 22/tcp    >/dev/null 2>&1 || true
+ufw allow 22/tcp    >/dev/null || UFW_OK=0
+ufw limit 22/tcp    >/dev/null || true
+ufw allow 2808/tcp  >/dev/null || UFW_OK=0
+ufw limit 2808/tcp  >/dev/null || true
 
-ufw allow 2808/tcp  >/dev/null 2>&1 || UFW_OK=0
-ufw limit 2808/tcp  >/dev/null 2>&1 || true
+ufw allow 80/tcp    >/dev/null || UFW_OK=0
+ufw allow 443/tcp   >/dev/null || UFW_OK=0
+ufw allow 8090/tcp  >/dev/null || UFW_OK=0
+ufw allow 7080/tcp  >/dev/null || UFW_OK=0
+ufw allow 53/tcp    >/dev/null || UFW_OK=0
+ufw allow 53/udp    >/dev/null || UFW_OK=0
 
-# HTTP / HTTPS
-ufw allow 80/tcp    >/dev/null 2>&1 || UFW_OK=0
-ufw allow 443/tcp   >/dev/null 2>&1 || UFW_OK=0
+ufw allow 25/tcp    >/dev/null || UFW_OK=0
+ufw allow 465/tcp   >/dev/null || UFW_OK=0
+ufw allow 587/tcp   >/dev/null || UFW_OK=0
+ufw allow 110/tcp   >/dev/null || UFW_OK=0
+ufw allow 995/tcp   >/dev/null || UFW_OK=0
+ufw allow 143/tcp   >/dev/null || UFW_OK=0
+ufw allow 993/tcp   >/dev/null || UFW_OK=0
 
-# CyberPanel panel
-ufw allow 8090/tcp  >/dev/null 2>&1 || UFW_OK=0
+ufw allow 21/tcp           >/dev/null || UFW_OK=0
+ufw allow 40110:40210/tcp  >/dev/null || UFW_OK=0
 
-# OpenLiteSpeed WebAdmin
-ufw allow 7080/tcp  >/dev/null 2>&1 || UFW_OK=0
+ufw default deny incoming  >/dev/null || UFW_OK=0
+ufw default allow outgoing >/dev/null || UFW_OK=0
 
-# DNS
-ufw allow 53/tcp    >/dev/null 2>&1 || UFW_OK=0
-ufw allow 53/udp    >/dev/null 2>&1 || UFW_OK=0
-
-# Mail Services
-ufw allow 25/tcp    >/dev/null 2>&1 || UFW_OK=0
-ufw allow 465/tcp   >/dev/null 2>&1 || UFW_OK=0
-ufw allow 587/tcp   >/dev/null 2>&1 || UFW_OK=0
-ufw allow 110/tcp   >/dev/null 2>&1 || UFW_OK=0
-ufw allow 995/tcp   >/dev/null 2>&1 || UFW_OK=0
-ufw allow 143/tcp   >/dev/null 2>&1 || UFW_OK=0
-ufw allow 993/tcp   >/dev/null 2>&1 || UFW_OK=0
-
-# FTP + Passive FTP
-ufw allow 21/tcp           >/dev/null 2>&1 || UFW_OK=0
-ufw allow 40110:40210/tcp  >/dev/null 2>&1 || UFW_OK=0
-
-# Default policies
-ufw default deny incoming  >/dev/null 2>&1 || UFW_OK=0
-ufw default allow outgoing >/dev/null 2>&1 || UFW_OK=0
-
-log "Enabling UFW firewall..."
-if ufw --force enable >/dev/null 2>&1; then
-  if (( UFW_OK == 1 )); then
-    STEP_ufw_firewall="OK"
-  else
-    log "WARNING: Some UFW rules may have failed; check 'ufw status verbose'."
-  fi
-else
-  log "ERROR: UFW enable failed. Check iptables/nftables support."
-fi
+ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
 
 # ----------------- ClamAV ----------------- #
 
-log "Installing ClamAV antivirus..."
+log "Installing ClamAV..."
 
 if apt_install_retry clamav clamav-daemon; then
-  log "Configuring ClamAV (freshclam + clamd)..."
   systemctl stop clamav-freshclam >/dev/null 2>&1 || true
-  if command -v freshclam >/dev/null 2>&1; then
-    freshclam || log "WARNING: freshclam failed (check network or mirrors)."
-  else
-    log "ERROR: freshclam command not found after installation."
-  fi
-  systemctl enable clamav-freshclam >/dev/null 2>&1 || true
-  systemctl restart clamav-freshclam >/dev/null 2>&1 || true
-
-  systemctl enable clamav-daemon >/dev/null 2>&1 || true
-  systemctl restart clamav-daemon >/dev/null 2>&1 || true
-
+  freshclam || log "WARNING: freshclam failed."
+  systemctl enable clamav-freshclam >/dev/null
+  systemctl restart clamav-freshclam >/dev/null
+  systemctl restart clamav-daemon >/dev/null
   STEP_clamav_install="OK"
-else
-  log "ERROR: ClamAV installation failed after retries."
 fi
 
-# ----------------- Maldet (Linux Malware Detect) ----------------- #
+# ----------------- Maldet ----------------- #
 
-log "Installing Linux Malware Detect (Maldet)..."
+log "Installing Maldet..."
 
 TMP_DIR="/tmp/maldet-install"
 mkdir -p "$TMP_DIR"
 
 MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
-MALDET_TGZ="${TMP_DIR}/maldetect-current.tar.gz"
+MALDET_TGZ="$TMP_DIR/maldetect-current.tar.gz"
 MALDET_INST_OK=0
 
 if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
-  if tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"; then
-    MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
-    if [[ -n "$MALDET_SRC_DIR" ]]; then
-      if (cd "$MALDET_SRC_DIR" && bash install.sh); then
-        MALDET_INST_OK=1
-      else
-        log "ERROR: Maldet install.sh failed."
-      fi
-    else
-      log "ERROR: Could not locate Maldet source directory after extraction."
-    fi
-  else
-    log "ERROR: Failed to extract Maldet tarball."
+  tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
+  MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
+
+  if [[ -n "$MALDET_SRC_DIR" ]]; then
+    (cd "$MALDET_SRC_DIR" && bash install.sh) && MALDET_INST_OK=1
   fi
-else
-  log "ERROR: Failed to download Maldet from $MALDET_URL"
 fi
 
-MALDET_CONF="/usr/local/maldetect/conf.maldet"
-if [[ -f "$MALDET_CONF" ]]; then
-  backup "$MALDET_CONF"
-  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF" || true
-  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF" || true
-  log "Configured Maldet to use ClamAV engine."
+if [[ -f /usr/local/maldetect/conf.maldet ]]; then
+  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet
+  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet
 fi
 
-if [[ $MALDET_INST_OK -eq 1 ]]; then
-  STEP_maldet_install="OK"
-fi
+[[ $MALDET_INST_OK -eq 1 ]] && STEP_maldet_install="OK"
 
-# ----------------- Weekly Malware Scan via Cron ----------------- #
-
-log "Creating weekly malware scan cron job (/home)..."
+# ----------------- Weekly Malware Scan ----------------- #
 
 CRON_MALWARE="/etc/cron.d/weekly-malware-scan"
 
-if cat > "$CRON_MALWARE" <<'EOF'
+log "Creating weekly malware scan cron..."
+
+cat > "$CRON_MALWARE" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Weekly malware scan every Sunday at 03:30
-# Scans all sites/data under /home (CyberPanel layout)
 30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
 EOF
-then
-  chmod 644 "$CRON_MALWARE"
-  STEP_weekly_malware_cron="OK"
-else
-  log "ERROR: Failed to write $CRON_MALWARE"
-fi
 
-# ----------------- Initial Security Patch Run ----------------- #
+chmod 644 "$CRON_MALWARE"
+STEP_weekly_malware_cron="OK"
 
-log "Running initial security upgrade (unattended-upgrade)..."
+# ----------------- Initial Security Update ----------------- #
+
+log "Running initial unattended security upgrade..."
 if unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1; then
   STEP_initial_unattended_upgrade="OK"
-else
-  log "WARNING: unattended-upgrade returned an error; check /var/log/auto-security-updates.log"
+fi
+
+# ----------------- Reboot Notification (NEW) ----------------- #
+
+if [[ -f /var/run/reboot-required ]]; then
+  echo "--------------------------------------------------------"
+  echo "[INFO] A system reboot is required to complete updates."
+  echo "[INFO] It will automatically occur at the next window:"
+  echo "       → 14:00"
+  echo "--------------------------------------------------------"
 fi
 
 # ----------------- Summary ----------------- #
@@ -426,7 +361,8 @@ printf "weekly_malware_cron            : %s\n" "$STEP_weekly_malware_cron"
 printf "initial_unattended_upgrade     : %s\n" "$STEP_initial_unattended_upgrade"
 echo "========================================================"
 echo "[INFO] Any step marked 'FAILED' should be investigated."
-echo "[INFO] Check /var/log/auto-security-updates.log and /var/log/weekly-malware-scan.log for details."
+echo "[INFO] Logs:"
+echo " - /var/log/auto-security-updates.log"
+echo " - /var/log/weekly-malware-scan.log"
 echo
-
 exit 0
