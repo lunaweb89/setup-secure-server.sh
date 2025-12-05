@@ -387,5 +387,17 @@ echo "[INFO] Logs:"
 echo " - /var/log/auto-security-updates.log"
 echo " - /var/log/weekly-malware-scan.log"
 echo
+# -------------------------------------------------------------
+# Run external backup module (GitHub-hosted)
+# -------------------------------------------------------------
+log "Running Backup + Storage Box module..."
+
+bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO/main/setup-backup-module.sh)
+
+if [[ $? -eq 0 ]]; then
+  log "Backup module completed successfully."
+else
+  log "ERROR: Backup module failed. Check above logs."
+fi
 
 exit 0
