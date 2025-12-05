@@ -31,6 +31,8 @@ export DEBIAN_FRONTEND=noninteractive
 echo "===== Hetzner Storage Box Backup Setup (Borg) ====="
 read -rp "Storage Box server (e.g. u515286.your-storagebox.de): " BOXHOST
 read -rp "Storage Box username (e.g. u515286): " BOXUSER
+read -srp "Storage Box password (used once to install SSH key, not stored): " BOXPASS
+echo
 read -rp "Storage Box SSH port (default 23): " BOXPORT
 BOXPORT="${BOXPORT:-23}"
 
@@ -43,7 +45,7 @@ if [[ -z "${BOXUSER}" || -z "${BOXHOST}" ]]; then
   exit 1
 fi
 
-# Note: Hetzner docs use /backup, not /backups
+# Hetzner standard path is /backup (no "s")
 REPOSITORY="ssh://${BOXUSER}@${BOXHOST}:${BOXPORT}/./backup/${REPO_DIR}"
 log "Borg repository will be: ${REPOSITORY}"
 
@@ -58,7 +60,6 @@ if [[ -f "${BORG_PASSFILE}" ]]; then
   log "Existing Borg passphrase found at ${BORG_PASSFILE}, reusing."
 else
   log "Generating secure Borg passphrase..."
-  # 32-char random string, escape '-' and force C locale
   GENERATED_PASSPHRASE="$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_\-+=' </dev/urandom | head -c 32 || true)"
 
   if [[ -z "${GENERATED_PASSPHRASE}" ]]; then
@@ -77,17 +78,17 @@ echo "${REPOSITORY}" > "${REPO_FILE}"
 chmod 600 "${REPO_FILE}"
 
 # -------------------------------------------------------------
-# INSTALL BORG
+# INSTALL BORG + SSHPASS
 # -------------------------------------------------------------
 
-log "Installing BorgBackup..."
+log "Installing BorgBackup + sshpass..."
 apt-get update -qq
-apt-get install -y -qq borgbackup
+apt-get install -y -qq borgbackup sshpass
 
 BORG_BIN="$(command -v borg || echo /usr/bin/borg)"
 
 # -------------------------------------------------------------
-# SSH KEY SETUP (HETZNER: USE -s, BUT ONLY IF NEEDED)
+# SSH KEY SETUP (HETZNER: USE -s, PASSWORD ONLY USED ONCE)
 # -------------------------------------------------------------
 
 if [[ ! -f /root/.ssh/id_rsa ]]; then
@@ -103,9 +104,12 @@ fi
 if ssh -p "${BOXPORT}" -o BatchMode=yes -o ConnectTimeout=5 "${BOXUSER}@${BOXHOST}" true 2>/dev/null; then
   log "SSH key already works on Storage Box, skipping ssh-copy-id."
 else
-  log "Copying SSH key to Storage Box (Hetzner requires -s)..."
-  ssh-copy-id -s -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
+  log "Copying SSH key to Storage Box with sshpass (Hetzner requires -s)..."
+  sshpass -p "${BOXPASS}" ssh-copy-id -s -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
 fi
+
+# We don't need the password anymore; clear it from memory
+unset BOXPASS
 
 # -------------------------------------------------------------
 # STORAGE BOX CONNECTION TEST - UPLOAD TEMP FILE
@@ -136,7 +140,7 @@ rm -f "$TESTFILE_LOCAL" || true
 log "Storage Box connectivity OK."
 
 # -------------------------------------------------------------
-# INIT BORG REPO (IDEMPOTENT, CREATE PARENT DIRS)
+# INIT BORG REPO (IDEMPOTENT, CREATE /backup/... IF NEEDED)
 # -------------------------------------------------------------
 
 log "Initializing (or verifying) Borg repository on Storage Box..."
@@ -250,4 +254,14 @@ chmod 644 "$CRON_BACKUP"
 echo
 log "Backup module installation finished successfully."
 
-echo "--------------------------------------
+echo "------------------------------------------------------------"
+echo " IMPORTANT: SAVE YOUR BORG PASSPHRASE"
+echo "------------------------------------------------------------"
+echo "${BORG_PASSPHRASE}"
+echo "------------------------------------------------------------"
+echo "The passphrase is stored locally at: /root/.borg-passphrase"
+echo "The repository URL is stored at:    /root/.borg-repository"
+echo "You must save the above passphrase somewhere safe."
+echo
+
+exit 0
