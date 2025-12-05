@@ -25,12 +25,12 @@ require_root
 export DEBIAN_FRONTEND=noninteractive
 
 # -------------------------------------------------------------
-# PROMPT FOR STORAGE BOX DETAILS
+# PROMPT FOR STORAGE BOX DETAILS (HOSTNAME FIRST)
 # -------------------------------------------------------------
 
 echo "===== Hetzner Storage Box Backup Setup (Borg) ====="
-read -rp "Storage Box username (e.g. u123456): " BOXUSER
-read -rp "Storage Box hostname (e.g. u123456.your-storagebox.de): " BOXHOST
+read -rp "Storage Box server (e.g. u515286.your-storagebox.de): " BOXHOST
+read -rp "Storage Box username (e.g. u515286): " BOXUSER
 read -rp "Storage Box SSH port (default 23): " BOXPORT
 BOXPORT="${BOXPORT:-23}"
 
@@ -50,18 +50,15 @@ BORG_PASSFILE="/root/.borg-passphrase"
 REPO_FILE="/root/.borg-repository"
 
 # -------------------------------------------------------------
-# AUTO-GENERATE PASSPHRASE
+# AUTO-GENERATE / LOAD PASSPHRASE
 # -------------------------------------------------------------
-
-GENERATED_PASSPHRASE=""
 
 if [[ -f "${BORG_PASSFILE}" ]]; then
   log "Existing Borg passphrase found at ${BORG_PASSFILE}, reusing."
 else
   log "Generating secure Borg passphrase..."
-  # 32-character random string from /dev/urandom (no openssl dependency)
+  # 32-char random string, escape '-' and force C locale
   GENERATED_PASSPHRASE="$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_\-+=' </dev/urandom | head -c 32 || true)"
-
 
   if [[ -z "${GENERATED_PASSPHRASE}" ]]; then
     err "Failed to generate random passphrase."
@@ -70,8 +67,6 @@ else
 
   echo "${GENERATED_PASSPHRASE}" > "${BORG_PASSFILE}"
   chmod 600 "${BORG_PASSFILE}"
-
-  log "Borg passphrase generated and stored securely."
 fi
 
 BORG_PASSPHRASE="$(<"${BORG_PASSFILE}")"
@@ -91,7 +86,7 @@ apt-get install -y -qq borgbackup
 BORG_BIN="$(command -v borg || echo /usr/bin/borg)"
 
 # -------------------------------------------------------------
-# SSH KEY SETUP
+# SSH KEY SETUP (HETZNER REQUIRES -s)
 # -------------------------------------------------------------
 
 if [[ ! -f /root/.ssh/id_rsa ]]; then
@@ -103,8 +98,8 @@ else
   log "Existing SSH key found at /root/.ssh/id_rsa, reusing."
 fi
 
-log "Copying SSH key to Storage Box (may prompt for password)..."
-ssh-copy-id -p "${BOXPORT}" -s "${BOXUSER}@${BOXHOST}"
+log "Copying SSH key to Storage Box (Hetzner requires -s)..."
+ssh-copy-id -s -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
 
 # -------------------------------------------------------------
 # STORAGE BOX CONNECTION TEST - UPLOAD TEMP FILE
@@ -129,15 +124,13 @@ else
   exit 1
 fi
 
-# Optional: remove test file from remote
 ssh -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" "rm -f ${TESTFILE_REMOTE}" >/dev/null 2>&1 || true
-
 rm -f "$TESTFILE_LOCAL" || true
 
 log "Storage Box connectivity OK."
 
 # -------------------------------------------------------------
-# INIT BORG REPO (idempotent)
+# INIT BORG REPO (IDEMPOTENT)
 # -------------------------------------------------------------
 
 log "Initializing (or verifying) Borg repository on Storage Box..."
@@ -245,7 +238,7 @@ EOF
 chmod 644 "$CRON_BACKUP"
 
 # -------------------------------------------------------------
-# TEST REMOTE ACCESS
+# TEST REMOTE ACCESS (OPTIONAL CHECK)
 # -------------------------------------------------------------
 
 log "Testing Storage Box Borg availability..."
