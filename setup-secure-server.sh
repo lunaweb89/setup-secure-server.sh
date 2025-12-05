@@ -115,7 +115,7 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
   fi
 
   if [[ -n "$UBUNTU_PRO_TOKEN" ]] && command -v pro >/dev/null 2>&1; then
-        # Check if machine is already attached (pro status still exits 0 even when "not attached")
+    # Check if machine is already attached (pro status exits 0 even when "not attached")
     if pro status 2>&1 | grep -qi "not attached"; then
       log "Machine is NOT attached to Ubuntu Pro — attaching now..."
       if pro attach "$UBUNTU_PRO_TOKEN"; then
@@ -127,18 +127,30 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
       log "Ubuntu Pro already attached; skipping 'pro attach'."
     fi
 
-    log "Enabling Livepatch via 'pro enable livepatch'..."
-    if pro enable livepatch >/dev/null 2>&1; then
-      if pro status 2>/dev/null | grep -qi 'livepatch.*enabled'; then
-        log "Livepatch enabled successfully via Ubuntu Pro."
-        STEP_livepatch="OK"
-      else
-        log "WARNING: Livepatch enable command ran, but status not confirmed as enabled."
-        STEP_livepatch="FAILED"
-      fi
+    # Now check if Livepatch is already enabled
+    if pro status 2>/dev/null | grep -qi 'livepatch.*enabled'; then
+      log "Livepatch already enabled via Ubuntu Pro."
+      STEP_livepatch="OK"
     else
-      log "WARNING: 'pro enable livepatch' failed."
-      STEP_livepatch="FAILED"
+      log "Enabling Livepatch via 'pro enable livepatch'..."
+      if pro enable livepatch >/dev/null 2>&1; then
+        if pro status 2>/dev/null | grep -qi 'livepatch.*enabled'; then
+          log "Livepatch enabled successfully via Ubuntu Pro."
+          STEP_livepatch="OK"
+        else
+          log "WARNING: Livepatch enable command ran, but status not confirmed as enabled."
+          STEP_livepatch="FAILED"
+        fi
+      else
+        # Even if 'pro enable livepatch' fails, double-check status
+        if pro status 2>/dev/null | grep -qi 'livepatch.*enabled'; then
+          log "Livepatch appears enabled despite 'pro enable livepatch' error."
+          STEP_livepatch="OK"
+        else
+          log "WARNING: 'pro enable livepatch' failed and Livepatch not reported enabled."
+          STEP_livepatch="FAILED"
+        fi
+      fi
     fi
   fi
 else
