@@ -4,7 +4,7 @@
 #
 # Helper to restore from Borg backups created by setup-backup-module.sh
 # Modes:
-#   1) Full restore (entire snapshot into /restore/...)
+#   1) Full restore (entire filesystem snapshot)
 #   2) WordPress + Email + MySQL + mail/LSWS configs for selected sites
 #
 # Non-destructive: everything is restored under /restore/... by default.
@@ -143,14 +143,13 @@ if [[ "$MODE" == "1" ]]; then
   fi
 
   log "Starting full borg extract (this may take a while)..."
-  # IMPORTANT: ARCHIVE argument must be "$REPOSITORY::$ARCHIVE"
-  if "$BORG_BIN" extract --progress --destination "$TARGET" "$REPOSITORY::$ARCHIVE"; then
-    log "Full restore completed successfully into $TARGET"
-    exit 0
-  else
-    err "borg extract failed for full restore."
-    exit 1
-  fi
+  (
+    cd "$TARGET"
+    # ARCHIVE must be first positional argument
+    "$BORG_BIN" extract --progress "$REPOSITORY::$ARCHIVE"
+  )
+  log "Full restore completed successfully into $TARGET"
+  exit 0
 fi
 
 # -------------------------------------------------------------
@@ -299,24 +298,23 @@ log "Starting partial borg extract into: $TARGET"
 echo "This may take a few minutes depending on archive size."
 echo
 
-# IMPORTANT: first non-option after flags *must* be ARCHIVE ("$REPOSITORY::$ARCHIVE")
-if "$BORG_BIN" extract --progress --destination "$TARGET" "$REPOSITORY::$ARCHIVE" "${PATHS[@]}"; then
-  log "Partial restore completed successfully into $TARGET"
-  echo
-  echo "Contents include (for selected sites):"
-  echo "  - home/<domain>/public_html   (WordPress files)"
-  echo "  - home/<domain>/mail          (if existed in archive)"
-  echo "  - var/backups/mysql/*.sql     (database dumps)"
-  echo "  - etc/postfix, etc/dovecot, etc/opendkim"
-  echo "  - etc/cyberpanel, usr/local/lsws, usr/local/CyberCP"
-  echo
-  echo "Next steps (on a rebuilt server) typically are:"
-  echo "  - rsync public_html into /home/<domain>/public_html"
-  echo "  - import the correct MySQL dump into a new DB"
-  echo "  - rsync mail/ if you want to restore mailboxes"
-  echo "  - compare/merge configs from etc/ and usr/local/lsws"
-  exit 0
-else
-  err "borg extract failed for partial restore."
-  exit 1
-fi
+(
+  cd "$TARGET"
+  # ARCHIVE must be the first positional argument
+  "$BORG_BIN" extract --progress "$REPOSITORY::$ARCHIVE" "${PATHS[@]}"
+)
+
+log "Partial restore completed successfully into $TARGET"
+echo
+echo "Contents include (for selected sites):"
+echo "  - home/<domain>/public_html   (WordPress files)"
+echo "  - home/<domain>/mail          (if existed in archive)"
+echo "  - var/backups/mysql/*.sql     (database dumps)"
+echo "  - etc/postfix, etc/dovecot, etc/opendkim"
+echo "  - etc/cyberpanel, usr/local/lsws, usr/local/CyberCP"
+echo
+echo "Next steps (on a rebuilt server) typically are:"
+echo "  - rsync public_html into /home/<domain>/public_html"
+echo "  - import the correct MySQL dump into a new DB"
+echo "  - rsync mail/ if you want to restore mailboxes"
+echo "  - compare/merge configs from etc/ and usr/local/lsws"
