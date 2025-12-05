@@ -115,14 +115,16 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
   fi
 
   if [[ -n "$UBUNTU_PRO_TOKEN" ]] && command -v pro >/dev/null 2>&1; then
-    # Check if already attached
-    if pro status >/dev/null 2>&1; then
-      log "Ubuntu Pro already initialised; skipping 'pro attach'."
-    else
-      log "Attaching this machine to Ubuntu Pro..."
-      if ! pro attach "$UBUNTU_PRO_TOKEN"; then
+        # Check if machine is already attached (pro status still exits 0 even when "not attached")
+    if pro status 2>&1 | grep -qi "not attached"; then
+      log "Machine is NOT attached to Ubuntu Pro — attaching now..."
+      if pro attach "$UBUNTU_PRO_TOKEN"; then
+        log "Ubuntu Pro attached successfully."
+      else
         log "WARNING: 'pro attach' failed — Livepatch may not be available."
       fi
+    else
+      log "Ubuntu Pro already attached; skipping 'pro attach'."
     fi
 
     log "Enabling Livepatch via 'pro enable livepatch'..."
