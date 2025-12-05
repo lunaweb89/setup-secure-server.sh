@@ -269,20 +269,27 @@ log "Configuring UFW firewall..."
 
 UFW_OK=1
 
+# SSH ports
 ufw allow 22/tcp    >/dev/null || UFW_OK=0
 ufw limit 22/tcp    >/dev/null || true
 ufw allow 2808/tcp  >/dev/null || UFW_OK=0
 ufw limit 2808/tcp  >/dev/null || true
 
+# HTTP/HTTPS
 ufw allow 80/tcp    >/dev/null || UFW_OK=0
 ufw allow 443/tcp   >/dev/null || UFW_OK=0
 
+# App ports
 ufw allow 8090/tcp  >/dev/null || UFW_OK=0
 ufw allow 7080/tcp  >/dev/null || UFW_OK=0
 
+# DNS
 ufw allow 53/tcp    >/dev/null || UFW_OK=0
 ufw allow 53/udp    >/dev/null || UFW_OK=0
+ufw allow out 53/tcp >/dev/null || UFW_OK=0
+ufw allow out 53/udp >/dev/null || UFW_OK=0
 
+# Email ports
 ufw allow 25/tcp    >/dev/null || UFW_OK=0
 ufw allow 465/tcp   >/dev/null || UFW_OK=0
 ufw allow 587/tcp   >/dev/null || UFW_OK=0
@@ -291,8 +298,12 @@ ufw allow 995/tcp   >/dev/null || UFW_OK=0
 ufw allow 143/tcp   >/dev/null || UFW_OK=0
 ufw allow 993/tcp   >/dev/null || UFW_OK=0
 
+# FTP
 ufw allow 21/tcp          >/dev/null || UFW_OK=0
 ufw allow 40110:40210/tcp >/dev/null || UFW_OK=0
+
+# Livepatch + Snapd traffic
+ufw allow out 443/tcp >/dev/null || UFW_OK=0
 
 ufw default deny incoming >/dev/null || UFW_OK=0
 ufw default allow outgoing >/dev/null || UFW_OK=0
