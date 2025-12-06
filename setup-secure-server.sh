@@ -8,7 +8,7 @@
 #   - Enable kernel Livepatch via Ubuntu Pro (optional)
 #   - Enable security-only automatic updates
 #   - Configure monthly cron job for updates
-#   - Harden SSH config (root login via password on port 2808 ONLY)
+#   - Harden SSH config (root login allowed, custom SSH port)
 #   - Install & configure Fail2Ban
 #   - Configure & enable UFW firewall
 #   - Install ClamAV + Maldet
@@ -19,6 +19,10 @@
 
 set -u   # strict on unset vars
 set -o pipefail
+
+# ----------------- Configurable SSH Port ----------------- #
+# Single custom SSH port used everywhere (SSH, UFW, Fail2Ban)
+SSH_PORT=2808
 
 # ----------------- Step Status ----------------- #
 STEP_update_base_packages="FAILED"
@@ -31,6 +35,8 @@ STEP_clamav_install="FAILED"
 STEP_maldet_install="FAILED"
 STEP_weekly_malware_cron="FAILED"
 STEP_initial_unattended_upgrade="FAILED"
+
+SSH_CONFIG_OK=0   # internal flag: SSH config validated but not yet reloaded
 
 # ----------------- Helpers ----------------- #
 
@@ -91,10 +97,6 @@ apt_install_retry() {
 require_root
 export DEBIAN_FRONTEND=noninteractive
 
-# Fixed custom SSH port
-SSH_PORT=2808
-log "Using SSH port: ${SSH_PORT}"
-
 # ----------------- Ubuntu Pro / Livepatch (Optional) ----------------- #
 echo "============================================================"
 echo " Ubuntu Pro Livepatch Setup (Optional)"
@@ -109,6 +111,7 @@ echo
 if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
   log "Setting up Ubuntu Pro + Livepatch..."
 
+  # Ensure 'pro' CLI is available
   if ! command -v pro >/dev/null 2>&1; then
     log "ubuntu-advantage-tools (pro CLI) missing — installing..."
     if ! apt_install_retry ubuntu-advantage-tools; then
@@ -118,6 +121,7 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
   fi
 
   if [[ -n "$UBUNTU_PRO_TOKEN" ]] && command -v pro >/dev/null 2>&1; then
+    # Attach if needed
     if pro status 2>&1 | grep -qi "not attached"; then
       log "Machine is NOT attached to Ubuntu Pro — attaching now..."
       if pro attach "$UBUNTU_PRO_TOKEN"; then
@@ -227,13 +231,13 @@ EOF
   STEP_auto_security_updates="OK"
 } || log "ERROR: Failed to configure unattended-upgrades."
 
-# ----------------- SSH Hardening ----------------- #
+# ----------------- SSH Hardening (config only, reload later) ----------------- #
 
 SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
 mkdir -p /etc/ssh/sshd_config.d
 backup "$SSH_HARDEN"
 
-log "Applying SSH hardening..."
+log "Applying SSH hardening (port ${SSH_PORT}, root+password allowed)..."
 
 if cat > "$SSH_HARDEN" <<EOF
 # SSH Hardening
@@ -253,20 +257,12 @@ ClientAliveInterval 300
 ClientAliveCountMax 2
 EOF
 then
-  # Also update main sshd_config if it has an active Port line
-  if [[ -f /etc/ssh/sshd_config ]]; then
-    backup /etc/ssh/sshd_config
-    if grep -qE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config; then
-      sed -i "s/^[[:space:]]*Port[[:space:]]\+[0-9]\+/Port ${SSH_PORT}/" /etc/ssh/sshd_config
-      log "Updated existing Port line in /etc/ssh/sshd_config to ${SSH_PORT}"
-    fi
-  fi
-
   if sshd -t 2>/dev/null; then
-    systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1
-    STEP_ssh_hardening="OK"
+    log "SSH configuration syntax OK. Reload will be done AFTER firewall check."
+    SSH_CONFIG_OK=1
   else
-    log "ERROR: SSH config test failed."
+    log "ERROR: SSH config test (sshd -t) failed. Not reloading sshd."
+    SSH_CONFIG_OK=0
   fi
 fi
 
@@ -302,9 +298,9 @@ log "Configuring UFW firewall..."
 
 UFW_OK=1
 
-# SSH port (ONLY 2808, 22 is NOT opened)
-ufw allow "${SSH_PORT}"/tcp  >/dev/null || UFW_OK=0
-ufw limit "${SSH_PORT}"/tcp  >/dev/null || true
+# SSH port (custom only, no port 22)
+ufw allow "${SSH_PORT}/tcp"    >/dev/null || UFW_OK=0
+ufw limit "${SSH_PORT}/tcp"    >/dev/null || true
 
 # HTTP/HTTPS
 ufw allow 80/tcp    >/dev/null || UFW_OK=0
@@ -341,6 +337,146 @@ ufw default allow outgoing >/dev/null || UFW_OK=0
 
 ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
 
+# ----------------- SSH Pre-Check + Safe Reload ----------------- #
+
+log "Pre-check: ensuring firewall allows SSH port ${SSH_PORT} before reloading sshd..."
+
+FIREWALL_ALLOWS_SSH=0
+if ufw status 2>/dev/null | grep -q "Status: active"; then
+  if ufw status 2>/dev/null | grep -E "[[:space:]]${SSH_PORT}/tcp[[:space:]]" | grep -q "ALLOW"; then
+    FIREWALL_ALLOWS_SSH=1
+  else
+    FIREWALL_ALLOWS_SSH=0
+  fi
+else
+  # If UFW is somehow not active, we won't reload SSH automatically
+  FIREWALL_ALLOWS_SSH=0
+fi
+
+if [[ "$SSH_CONFIG_OK" -eq 1 && "$FIREWALL_ALLOWS_SSH" -eq 1 ]]; then
+  log "Firewall appears to allow port ${SSH_PORT}/tcp. Reloading sshd to apply new port..."
+  if systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1; then
+    STEP_ssh_hardening="OK"
+    log "SSH is now configured to use ONLY port ${SSH_PORT}. Port 22 is not opened by this script."
+    log "Use: ssh -p ${SSH_PORT} root@YOUR_SERVER_IP"
+  else
+    log "ERROR: Failed to reload sshd. SSH is still using the old configuration."
+  fi
+else
+  log "WARNING: Skipping SSH reload because either:"
+  log "  - SSH config did not validate, or"
+  log "  - UFW does NOT clearly show an ALLOW rule for port ${SSH_PORT}/tcp."
+  log "SSH is still running with its previous port configuration."
+  log "Check:"
+  log "  - /etc/ssh/sshd_config.d/99-hardening.conf"
+  log "  - 'ufw status' for port ${SSH_PORT}"
+  log "Then manually run: systemctl reload ssh"
+fi
+
 # ----------------- ClamAV ----------------- #
-# (unchanged)
-# ... keep the rest of your script from here onward as-is ...
+
+log "Installing ClamAV..."
+
+if apt_install_retry clamav clamav-daemon; then
+  systemctl stop clamav-freshclam >/dev/null 2>&1 || true
+  freshclam || log "WARNING: freshclam failed."
+  systemctl enable clamav-freshclam >/dev/null
+  systemctl restart clamav-freshclam >/dev/null
+  systemctl restart clamav-daemon >/dev/null
+  STEP_clamav_install="OK"
+fi
+
+# ----------------- Maldet ----------------- #
+
+log "Installing Maldet..."
+
+TMP_DIR="/tmp/maldet-install"
+mkdir -p "$TMP_DIR"
+
+MALDET_TGZ="$TMP_DIR/maldetect-current.tar.gz"
+MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
+
+MALDET_INST_OK=0
+
+if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
+  tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
+  MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
+  if [[ -n "$MALDET_SRC_DIR" ]]; then
+    (cd "$MALDET_SRC_DIR" && bash install.sh) && MALDET_INST_OK=1
+  fi
+fi
+
+if [[ -f /usr/local/maldetect/conf.maldet ]]; then
+  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet
+  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet
+  STEP_maldet_install="OK"
+fi
+
+# ----------------- Weekly Malware Scan ----------------- #
+
+CRON_MALWARE="/etc/cron.d/weekly-malware-scan"
+
+log "Creating weekly malware scan cron job..."
+
+cat > "$CRON_MALWARE" <<'EOF'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
+EOF
+
+chmod 644 "$CRON_MALWARE"
+STEP_weekly_malware_cron="OK"
+
+# ----------------- Initial Upgrade ----------------- #
+
+log "Running initial unattended security upgrade..."
+
+if unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1; then
+  STEP_initial_unattended_upgrade="OK"
+fi
+
+# ----------------- Reboot Notification ----------------- #
+
+if [[ -f /var/run/reboot-required ]]; then
+  echo "--------------------------------------------------------"
+  echo "[INFO] A system reboot is required."
+  echo "[INFO] Automatic reboot is DISABLED — reboot manually when convenient."
+  echo "--------------------------------------------------------"
+fi
+
+# ----------------- Summary ----------------- #
+
+echo
+echo "================ Secure Server Setup Summary ================"
+printf "update_base_packages           : %s\n" "$STEP_update_base_packages"
+printf "livepatch                      : %s\n" "$STEP_livepatch"
+printf "auto_security_updates          : %s\n" "$STEP_auto_security_updates"
+printf "ssh_hardening                  : %s\n" "$STEP_ssh_hardening"
+printf "fail2ban_config                : %s\n" "$STEP_fail2ban_config"
+printf "ufw_firewall                   : %s\n" "$STEP_ufw_firewall"
+printf "clamav_install                 : %s\n" "$STEP_clamav_install"
+printf "maldet_install                 : %s\n" "$STEP_maldet_install"
+printf "weekly_malware_cron            : %s\n" "$STEP_weekly_malware_cron"
+printf "initial_unattended_upgrade     : %s\n" "$STEP_initial_unattended_upgrade"
+echo "=============================================================="
+echo "[INFO] Logs:"
+echo " - /var/log/auto-security-updates.log"
+echo " - /var/log/weekly-malware-scan.log"
+echo
+
+# -------------------------------------------------------------
+# Optional: Run external backup module (GitHub-hosted)
+# -------------------------------------------------------------
+read -r -p "Run Backup + Storage Box module now? [y/N]: " RUN_BACKUP
+if [[ "$RUN_BACKUP" =~ ^[Yy]$ ]]; then
+  log "Running Backup + Storage Box module..."
+  if bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-backup-module.sh); then
+    log "Backup module completed successfully."
+  else
+    log "ERROR: Backup module failed. Check above logs."
+  fi
+else
+  log "Skipping Backup + Storage Box module."
+fi
+
+exit 0
