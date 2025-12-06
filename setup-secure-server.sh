@@ -536,9 +536,13 @@ if [[ "$TCP_TEST_OK" -eq 1 ]]; then
   read -r -p "Enter the username for SSH login (default: root): " SSH_USER
   SSH_USER="${SSH_USER:-root}"
 
-  # Test SSH login using the provided username and port 2808
+  # Prompt for SSH password for the specified user
+  read -s -r -p "Enter SSH password for $SSH_USER@$SSH_TEST_HOST: " SSH_PASSWORD
+  echo
+
+  # Test SSH login using the provided username, password, and port 2808
   SSH_TEST_OK=0
-  if ssh -p 2808 "$SSH_USER@$SSH_TEST_HOST" 'exit' >/dev/null 2>&1; then
+  if sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no -p 2808 "$SSH_USER@$SSH_TEST_HOST" 'exit' >/dev/null 2>&1; then
     echo "[OK] SSH login successful on ${SSH_TEST_HOST}:2808."
     SSH_TEST_OK=1
   else
