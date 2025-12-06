@@ -8,9 +8,9 @@
 #   - Enable kernel Livepatch via Ubuntu Pro (optional)
 #   - Enable security-only automatic updates
 #   - Configure monthly cron job for updates
-#   - Harden SSH config (move SSH to custom port, root+password allowed)
+#   - Harden SSH config (move SSH to port, root+password allowed)
 #   - Install & configure Fail2Ban
-#   - Configure & enable UFW firewall (SSH ONLY on custom port, not 22)
+#   - Configure & enable UFW firewall (SSH ONLY on 2808, not 22)
 #   - Install ClamAV + Maldet
 #   - Create weekly malware scan cron job
 #
@@ -31,11 +31,6 @@ STEP_clamav_install="FAILED"
 STEP_maldet_install="FAILED"
 STEP_weekly_malware_cron="FAILED"
 STEP_initial_unattended_upgrade="FAILED"
-
-# ----------------- Custom Port Configuration ----------------- #
-# Define custom SSH port here (e.g., 2808)
-CUSTOM_SSH_PORT="2808"  # Change this line to set a custom SSH port
-LOGGED_PORT="Custom port"  # Masked output for SSH port
 
 # ----------------- Helpers ----------------- #
 
@@ -143,6 +138,7 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
       STEP_livepatch="OK"
     else
       log "Enabling Livepatch via 'pro enable livepatch' (ignore errors if already enabled)..."
+      # Do NOT trust the exit code; some versions return non-zero even when it works
       pro enable livepatch >/tmp/pro-livepatch.log 2>&1 || true
 
       if is_livepatch_enabled; then
@@ -252,26 +248,19 @@ EOF
   STEP_auto_security_updates="OK"
 } || log "ERROR: Failed to configure unattended-upgrades."
 
-# ----------------- SSH Hardening (custom port) ----------------- #
+# ----------------- SSH Hardening (port 2808 only) ----------------- #
 
 SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
 mkdir -p /etc/ssh/sshd_config.d
 backup "$SSH_HARDEN"
 
-log "Applying SSH hardening (SSH on $LOGGED_PORT only, root+password allowed)..."
-
-# Overwrite the existing Port line with custom port if it exists in sshd_config
-if grep -q "^Port" /etc/ssh/sshd_config; then
-  sed -i "s/^Port.*/Port $CUSTOM_SSH_PORT/" /etc/ssh/sshd_config
-else
-  echo "Port $CUSTOM_SSH_PORT" >> /etc/ssh/sshd_config
-fi
+log "Applying SSH hardening (SSH on port 2808 only, root+password allowed)..."
 
 SSH_CONFIG_OK=0
 
-if cat > "$SSH_HARDEN" <<EOF
+if cat > "$SSH_HARDEN" <<'EOF'
 # SSH Hardening
-Port $CUSTOM_SSH_PORT
+Port 2808
 Protocol 2
 PermitRootLogin yes
 PasswordAuthentication yes
@@ -295,6 +284,9 @@ then
   fi
 fi
 
+# NOTE: We set STEP_ssh_hardening to OK only AFTER sshd is reloaded safely
+# once UFW is confirmed to allow port 2808.
+
 # ----------------- Fail2Ban ----------------- #
 
 FAIL_JAIL="/etc/fail2ban/jail.local"
@@ -303,7 +295,7 @@ backup "$FAIL_JAIL"
 
 log "Configuring Fail2Ban..."
 
-if cat > "$FAIL_JAIL" <<EOF
+if cat > "$FAIL_JAIL" <<'EOF'
 [DEFAULT]
 bantime  = 1h
 findtime = 10m
@@ -311,7 +303,7 @@ maxretry = 5
 
 [sshd]
 enabled  = true
-port     = $CUSTOM_SSH_PORT
+port     = 2808
 logpath  = %(sshd_log)s
 backend  = systemd
 EOF
@@ -327,18 +319,70 @@ log "Configuring UFW firewall..."
 
 UFW_OK=1
 
+# Allow SSH on both port 22 (default) and port 2808
 ufw delete allow OpenSSH  >/dev/null 2>&1 || true
 ufw delete limit OpenSSH  >/dev/null 2>&1 || true
 ufw delete allow 22/tcp   >/dev/null 2>&1 || true
 ufw delete limit 22/tcp   >/dev/null 2>&1 || true
 
-# Ensure custom port is allowed
-ufw allow $CUSTOM_SSH_PORT/tcp        >/dev/null || UFW_OK=0
+# Ensure port 2808 is allowed
+ufw allow 2808/tcp        >/dev/null || UFW_OK=0
+
+# Allow other essential ports
+ufw allow 80/tcp          >/dev/null || UFW_OK=0
+ufw allow 443/tcp         >/dev/null || UFW_OK=0
+
+# App ports
+ufw allow 8090/tcp        >/dev/null || UFW_OK=0
+ufw allow 7080/tcp        >/dev/null || UFW_OK=0
+
+# DNS
+ufw allow 53/tcp          >/dev/null || UFW_OK=0
+ufw allow 53/udp          >/dev/null || UFW_OK=0
+ufw allow out 53/tcp      >/dev/null || UFW_OK=0
+ufw allow out 53/udp      >/dev/null || UFW_OK=0
+
+# Email ports
+ufw allow 25/tcp          >/dev/null || UFW_OK=0
+ufw allow 465/tcp         >/dev/null || UFW_OK=0
+ufw allow 587/tcp         >/dev/null || UFW_OK=0
+ufw allow 110/tcp         >/dev/null || UFW_OK=0
+ufw allow 995/tcp         >/dev/null || UFW_OK=0
+ufw allow 143/tcp         >/dev/null || UFW_OK=0
+ufw allow 993/tcp         >/dev/null || UFW_OK=0
+
+# FTP
+ufw allow 21/tcp          >/dev/null || UFW_OK=0
+ufw allow 40110:40210/tcp >/dev/null || UFW_OK=0
+
+# Livepatch + Snapd traffic (HTTPS out)
+ufw allow out 443/tcp     >/dev/null || UFW_OK=0
 
 ufw default deny incoming  >/dev/null || UFW_OK=0
 ufw default allow outgoing >/dev/null || UFW_OK=0
 
 ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
+
+# ---- Pre-check: ensure 2808 is allowed/limited before reloading SSH ---- #
+
+if [[ "$SSH_CONFIG_OK" -eq 1 ]]; then
+  log "[Pre-check] Ensuring firewall allows SSH port 2808 before reloading sshd..."
+
+  if ufw status | grep -E '2808/tcp' | grep -E 'ALLOW|LIMIT' >/dev/null 2>&1; then
+    if systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1; then
+      log "SSH reloaded successfully. SSH now listens ONLY on port 2808."
+      STEP_ssh_hardening="OK"
+    else
+      log "WARNING: Failed to reload sshd. Check 'systemctl status ssh' and logs."
+    fi
+  else
+    log "[WARNING] UFW does not show an ALLOW/LIMIT rule for 2808/tcp."
+    log "[WARNING] Not reloading sshd to avoid locking you out."
+    log "[INFO] After fixing firewall, run: systemctl reload ssh"
+  fi
+else
+  log "[WARNING] SSH hardening not fully applied because sshd -t failed earlier."
+fi
 
 # ----------------- ClamAV ----------------- #
 
@@ -346,6 +390,7 @@ log "Checking ClamAV installation..."
 
 if command -v clamscan >/dev/null 2>&1 && dpkg -s clamav-daemon >/dev/null 2>&1; then
   log "ClamAV already installed; skipping package installation."
+  # Make sure services are enabled/running
   systemctl enable clamav-freshclam >/dev/null 2>&1 || true
   systemctl restart clamav-freshclam >/dev/null 2>&1 || true
   systemctl restart clamav-daemon >/dev/null 2>&1 || true
@@ -362,6 +407,45 @@ else
   else
     log "ERROR: Failed to install ClamAV packages."
   fi
+fi
+
+# ----------------- Maldet ----------------- #
+
+log "Checking Maldet installation..."
+
+MALDET_CONF="/usr/local/maldetect/conf.maldet"
+
+if [[ -x /usr/local/maldetect/maldet || -x /usr/local/sbin/maldet || -x /usr/local/sbin/lmd ]]; then
+  log "Maldet already installed; skipping re-install."
+else
+  log "Installing Maldet..."
+
+  TMP_DIR="/tmp/maldet-install"
+  mkdir -p "$TMP_DIR"
+
+  MALDET_TGZ="$TMP_DIR/maldetect-current.tar.gz"
+  MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
+
+  if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
+    tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
+    MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
+    if [[ -n "$MALDET_SRC_DIR" ]]; then
+      (cd "$MALDET_SRC_DIR" && bash install.sh) || log "WARNING: Maldet install.sh returned a non-zero exit."
+    else
+      log "WARNING: Could not find extracted Maldet source directory."
+    fi
+  else
+    log "WARNING: Failed to download Maldet tarball."
+  fi
+fi
+
+# Configure Maldet if config exists (whether newly installed or already present)
+if [[ -f "$MALDET_CONF" ]]; then
+  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF"
+  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF"
+  STEP_maldet_install="OK"
+else
+  log "WARNING: Maldet config file not found at $MALDET_CONF"
 fi
 
 # ----------------- Weekly Malware Scan ----------------- #
@@ -415,5 +499,90 @@ echo "[INFO] Logs:"
 echo " - /var/log/auto-security-updates.log"
 echo " - /var/log/weekly-malware-scan.log"
 echo
+
+# ----------------- SSH Connectivity Test (Port 2808) ----------------- #
+# Non-interactive TCP check so the script flow is not disrupted
+
+echo "================ SSH Connectivity Test (port 2808) ================"
+
+# Best-effort guess of primary server IP (for info only)
+SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
+  SERVER_IP_GUESS="127.0.0.1"
+fi
+
+read -r -p "Enter server IP/hostname to test TCP on port 2808 [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
+SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
+
+# Try to ensure we have a TCP testing tool
+TCP_TEST_OK=0
+
+if command -v nc >/dev/null 2>&1; then
+  :
+else
+  log "netcat (nc) not found — installing netcat-openbsd for TCP check..."
+  apt_install_retry netcat-openbsd || log "WARNING: Failed to install netcat-openbsd; will try /dev/tcp fallback."
+fi
+
+if command -v nc >/dev/null 2>&1; then
+  # Use netcat to test connectivity (no SSH login, just TCP connect)
+  if nc -zw5 "$SSH_TEST_HOST" 2808 >/dev/null 2>&1; then
+    echo "[OK] TCP connection to ${SSH_TEST_HOST}:2808 succeeded (port is open)."
+    TCP_TEST_OK=1
+  else
+    echo "[-] WARNING: TCP connection to ${SSH_TEST_HOST}:2808 FAILED."
+    echo "    Check that sshd is listening on port 2808 and that UFW allows it."
+  fi
+else
+  # Fallback: bash /dev/tcp trick with timeout
+  if command -v timeout >/dev/null 2>&1; then
+    if timeout 5 bash -c "echo >/dev/tcp/${SSH_TEST_HOST}/2808" 2>/dev/null; then
+      echo "[OK] TCP connection to ${SSH_TEST_HOST}:2808 succeeded (via /dev/tcp)."
+      TCP_TEST_OK=1
+    else
+      echo "[-] WARNING: TCP connection to ${SSH_TEST_HOST}:2808 FAILED (via /dev/tcp)."
+      echo "    Check that sshd is listening on port 2808 and that UFW allows it."
+    fi
+  else
+    echo "[-] WARNING: No nc or timeout available; skipping automated TCP test."
+  fi
+fi
+
+# SSH connection check (actual SSH login attempt to confirm)
+if [[ "$TCP_TEST_OK" -eq 1 ]]; then
+  echo "Attempting to SSH into ${SSH_TEST_HOST} on port 2808..."
+
+  # Try SSH connection to the provided host and port
+  if ssh -p 2808 root@"$SSH_TEST_HOST" exit; then
+    echo "[OK] SSH connection to ${SSH_TEST_HOST} on port 2808 succeeded."
+  else
+    echo "[-] WARNING: SSH connection to ${SSH_TEST_HOST} on port 2808 failed."
+    echo "    Check that SSH is correctly configured to listen on port 2808."
+    echo "    You can test manually by running: 'ssh -p 2808 root@${SSH_TEST_HOST}'."
+  fi
+fi
+
+if [[ "$TCP_TEST_OK" -eq 1 ]]; then
+  echo "[INFO] SSH on port 2808 appears reachable."
+else
+  echo "[INFO] Please verify SSH access from your own machine before closing this session."
+fi
+
+echo "=================================================================="
+
+# -------------------------------------------------------------
+# Optional: Run external backup module (GitHub-hosted)
+# -------------------------------------------------------------
+read -r -p "Run Backup + Storage Box module now? [y/N]: " RUN_BACKUP
+if [[ "$RUN_BACKUP" =~ ^[Yy]$ ]]; then
+  log "Running Backup + Storage Box module..."
+  if bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-backup-module.sh); then
+    log "Backup module completed successfully."
+  else
+    log "ERROR: Backup module failed. Check above logs."
+  fi
+else
+  log "Skipping Backup + Storage Box module."
+fi
 
 exit 0
