@@ -243,6 +243,20 @@ then
   fi
 fi
 
+# ----------------- UFW Firewall ----------------- #
+log "Configuring UFW firewall to allow port $CUSTOM_SSH_PORT..."
+
+# Allow the custom SSH port in UFW
+sudo ufw allow $CUSTOM_SSH_PORT/tcp
+sudo ufw reload
+
+# ----------------- Fail2Ban ----------------- #
+log "Configuring Fail2Ban for custom SSH port $CUSTOM_SSH_PORT..."
+
+# Modify Fail2Ban config to use the custom port
+sudo sed -i "s/^port = ssh/port = $CUSTOM_SSH_PORT/" /etc/fail2ban/jail.local
+sudo systemctl restart fail2ban
+
 # Reload SSH only after the firewall is updated and port is allowed
 if [[ "$SSH_CONFIG_OK" -eq 1 ]]; then
   log "[Pre-check] Ensuring firewall allows SSH port $CUSTOM_SSH_PORT before reloading sshd..."
