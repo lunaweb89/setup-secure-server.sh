@@ -531,7 +531,7 @@ echo " - /var/log/weekly-malware-scan.log"
 echo
 
 # ----------------- SSH Connectivity Test (Custom Port) ----------------- #
-systemctl restart sshd
+#systemctl restart sshd#
 # Make sure ssh client exists (usually already installed)
 if ! command -v ssh >/dev/null 2>&1; then
   log "ssh client not found — installing openssh-client..."
