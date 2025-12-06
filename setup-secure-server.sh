@@ -366,41 +366,66 @@ fi
 
 # ----------------- ClamAV ----------------- #
 
-log "Installing ClamAV..."
+log "Checking ClamAV installation..."
 
-if apt_install_retry clamav clamav-daemon; then
-  systemctl stop clamav-freshclam >/dev/null 2>&1 || true
-  freshclam || log "WARNING: freshclam failed."
-  systemctl enable clamav-freshclam >/dev/null
-  systemctl restart clamav-freshclam >/dev/null
-  systemctl restart clamav-daemon >/dev/null
+if command -v clamscan >/dev/null 2>&1 && dpkg -s clamav-daemon >/dev/null 2>&1; then
+  log "ClamAV already installed; skipping package installation."
+  # Make sure services are enabled/running
+  systemctl enable clamav-freshclam >/dev/null 2>&1 || true
+  systemctl restart clamav-freshclam >/dev/null 2>&1 || true
+  systemctl restart clamav-daemon >/dev/null 2>&1 || true
   STEP_clamav_install="OK"
+else
+  log "Installing ClamAV..."
+  if apt_install_retry clamav clamav-daemon; then
+    systemctl stop clamav-freshclam >/dev/null 2>&1 || true
+    freshclam || log "WARNING: freshclam failed."
+    systemctl enable clamav-freshclam >/dev/null 2>&1 || true
+    systemctl restart clamav-freshclam >/dev/null 2>&1 || true
+    systemctl restart clamav-daemon >/dev/null 2>&1 || true
+    STEP_clamav_install="OK"
+  else
+    log "ERROR: Failed to install ClamAV packages."
+  fi
 fi
 
 # ----------------- Maldet ----------------- #
 
-log "Installing Maldet..."
+log "Checking Maldet installation..."
 
-TMP_DIR="/tmp/maldet-install"
-mkdir -p "$TMP_DIR"
+MALDET_CONF="/usr/local/maldetect/conf.maldet"
 
-MALDET_TGZ="$TMP_DIR/maldetect-current.tar.gz"
-MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
+if [[ -x /usr/local/maldetect/maldet || -x /usr/local/sbin/maldet || -x /usr/local/sbin/lmd ]]; then
+  log "Maldet already installed; skipping re-install."
+else
+  log "Installing Maldet..."
 
-MALDET_INST_OK=0
+  TMP_DIR="/tmp/maldet-install"
+  mkdir -p "$TMP_DIR"
 
-if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
-  tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
-  MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
-  if [[ -n "$MALDET_SRC_DIR" ]]; then
-    (cd "$MALDET_SRC_DIR" && bash install.sh) && MALDET_INST_OK=1
+  MALDET_TGZ="$TMP_DIR/maldetect-current.tar.gz"
+  MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
+
+  if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
+    tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
+    MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
+    if [[ -n "$MALDET_SRC_DIR" ]]; then
+      (cd "$MALDET_SRC_DIR" && bash install.sh) || log "WARNING: Maldet install.sh returned a non-zero exit."
+    else
+      log "WARNING: Could not find extracted Maldet source directory."
+    fi
+  else
+    log "WARNING: Failed to download Maldet tarball."
   fi
 fi
 
-if [[ -f /usr/local/maldetect/conf.maldet ]]; then
-  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet
-  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet
+# Configure Maldet if config exists (whether newly installed or already present)
+if [[ -f "$MALDET_CONF" ]]; then
+  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF"
+  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF"
   STEP_maldet_install="OK"
+else
+  log "WARNING: Maldet config file not found at $MALDET_CONF"
 fi
 
 # ----------------- Weekly Malware Scan ----------------- #
