@@ -473,4 +473,67 @@ echo " - /var/log/auto-security-updates.log"
 echo " - /var/log/weekly-malware-scan.log"
 echo
 
+# ----------------- SSH Connectivity Test (Custom Port) ----------------- #
+
+# Make sure ssh client exists (usually already installed)
+if ! command -v ssh >/dev/null 2>&1; then
+  log "ssh client not found — installing openssh-client..."
+  apt_install_retry openssh-client || log "WARNING: Failed to install openssh-client; SSH test may not run."
+fi
+
+if command -v ssh >/dev/null 2>&1; then
+  echo "================ SSH Connectivity Test (port $CUSTOM_SSH_PORT) ================"
+  
+  # Best-effort guess of primary server IP
+  SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
+    SERVER_IP_GUESS="127.0.0.1"
+  fi
+
+  # Prompt for the server IP/hostname to test SSH on the custom port
+  read -r -p "Enter server IP/hostname to test SSH on port $CUSTOM_SSH_PORT [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
+  SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
+
+  echo
+  echo "[INFO] The script will now start a TEST SSH session:"
+  echo "       ssh -p $CUSTOM_SSH_PORT root@${SSH_TEST_HOST}"
+  echo "       Log in with your ROOT password when prompted."
+  echo "       After entering your password, type 'exit' to return to this setup script."
+  read -r -p "Press ENTER to start the SSH test..." _
+
+  # Run SSH test on custom port
+  ssh -p "$CUSTOM_SSH_PORT" "root@${SSH_TEST_HOST}"
+  SSH_TEST_RC=$?
+
+  if [[ "$SSH_TEST_RC" -eq 0 ]]; then
+    echo "[OK] SSH test session to root@${SSH_TEST_HOST}:$CUSTOM_SSH_PORT completed successfully."
+    echo "     You should now be safe to reconnect on port $CUSTOM_SSH_PORT after a reboot."
+  else
+    echo "[-] WARNING: SSH test to root@${SSH_TEST_HOST}:$CUSTOM_SSH_PORT failed or was aborted (exit code: $SSH_TEST_RC)."
+    echo "    Do NOT close your current SSH session until you have fixed SSH/Firewall settings."
+  fi
+
+  echo "=================================================================="
+  echo
+else
+  echo "[-] WARNING: ssh client is not available; skipping SSH connectivity test."
+fi
+
+echo "=================================================================="
+
+# -------------------------------------------------------------
+# Optional: Run external backup module (GitHub-hosted)
+# -------------------------------------------------------------
+read -r -p "Run Backup + Storage Box module now? [y/N]: " RUN_BACKUP
+if [[ "$RUN_BACKUP" =~ ^[Yy]$ ]]; then
+  log "Running Backup + Storage Box module..."
+  if bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-backup-module.sh); then
+    log "Backup module completed successfully."
+  else
+    log "ERROR: Backup module failed. Check above logs."
+  fi
+else
+  log "Skipping Backup + Storage Box module."
+fi
+
 exit 0
