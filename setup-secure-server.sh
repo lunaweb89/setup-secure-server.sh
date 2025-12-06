@@ -359,6 +359,37 @@ ufw default allow outgoing >/dev/null || UFW_OK=0
 
 ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
 
+# ----------------- Firewalld Configuration ----------------- #
+
+log "Configuring Firewalld..."
+
+FIREWALL_OK=1
+
+# Add the custom SSH port to firewalld under SSHCustom
+# We add the custom port to the Firewalld service named SSHCustom.
+sudo firewall-cmd --zone=public --add-port=$CUSTOM_SSH_PORT/tcp --permanent >/dev/null || FIREWALL_OK=0
+
+# Ensure the SSHCustom service exists in firewalld for the custom SSH port
+# Check if the custom SSH service exists
+if ! sudo firewall-cmd --list-services | grep -q "SSHCustom"; then
+  log "Creating SSHCustom service for port $CUSTOM_SSH_PORT in Firewalld..."
+  
+  # Define the custom SSH service in firewalld (if it doesn't exist already)
+  sudo firewall-cmd --permanent --new-service=SSHCustom
+  sudo firewall-cmd --permanent --service=SSHCustom --add-port=$CUSTOM_SSH_PORT/tcp
+
+  # Reload firewalld to apply changes
+  sudo firewall-cmd --reload >/dev/null && log "Firewalld reloaded successfully with SSHCustom service."
+else
+  log "SSHCustom service already exists in Firewalld."
+fi
+
+if [[ "$FIREWALL_OK" -eq 1 ]]; then
+  log "Custom port $CUSTOM_SSH_PORT added to Firewalld successfully under SSHCustom."
+else
+  log "Failed to add custom port $CUSTOM_SSH_PORT to Firewalld under SSHCustom."
+fi
+
 # ----------------- ClamAV ----------------- #
 
 log "Checking ClamAV installation..."
