@@ -169,8 +169,28 @@ apt-get -f install -y || true
 log "Running apt-get update..."
 apt_update_retry || log "ERROR: apt-get update failed."
 
-log "Installing required base packages..."
-if apt_install_retry lsb-release ca-certificates openssh-server cron ufw fail2ban unattended-upgrades curl wget tar; then
+log "Checking required base packages (lsb-release, ufw, fail2ban, etc.)..."
+
+BASE_PKGS=(lsb-release ca-certificates openssh-server cron ufw fail2ban unattended-upgrades curl wget tar)
+NEED_INSTALL=()
+
+for pkg in "${BASE_PKGS[@]}"; do
+  if dpkg -s "$pkg" >/dev/null 2>&1; then
+    continue
+  else
+    NEED_INSTALL+=("$pkg")
+  fi
+done
+
+if ((${#NEED_INSTALL[@]} > 0)); then
+  log "Installing required base packages: ${NEED_INSTALL[*]}"
+  if apt_install_retry "${NEED_INSTALL[@]}"; then
+    STEP_update_base_packages="OK"
+  else
+    log "ERROR: Failed to install some base packages."
+  fi
+else
+  log "All required base packages already installed; skipping apt-get install."
   STEP_update_base_packages="OK"
 fi
 
@@ -288,8 +308,8 @@ logpath  = %(sshd_log)s
 backend  = systemd
 EOF
 then
-  systemctl enable fail2ban >/dev/null
-  systemctl restart fail2ban >/dev/null
+  systemctl enable fail2ban >/dev/null 2>&1 || true
+  systemctl restart fail2ban >/dev/null 2>&1 || true
   STEP_fail2ban_config="OK"
 fi
 
