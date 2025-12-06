@@ -339,17 +339,22 @@ ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
 
 # ----------------- SSH Pre-Check + Safe Reload ----------------- #
 
+# ----------------- SSH Pre-Check + Safe Reload ----------------- #
+
 log "Pre-check: ensuring firewall allows SSH port ${SSH_PORT} before reloading sshd..."
 
 FIREWALL_ALLOWS_SSH=0
-if ufw status 2>/dev/null | grep -q "Status: active"; then
-  if ufw status 2>/dev/null | grep -E "[[:space:]]${SSH_PORT}/tcp[[:space:]]" | grep -q "ALLOW"; then
+UFW_STATUS="$(ufw status 2>/dev/null || true)"
+
+if echo "$UFW_STATUS" | grep -q "Status: active"; then
+  # Match lines like:
+  #   2808/tcp                  ALLOW       Anywhere
+  #   2808                      ALLOW       Anywhere
+  if echo "$UFW_STATUS" | grep -E "^[[:space:]]*${SSH_PORT}(/tcp)?[[:space:]]+ALLOW" >/dev/null; then
     FIREWALL_ALLOWS_SSH=1
-  else
-    FIREWALL_ALLOWS_SSH=0
   fi
 else
-  # If UFW is somehow not active, we won't reload SSH automatically
+  # If UFW is not active, we do NOT auto-reload SSH
   FIREWALL_ALLOWS_SSH=0
 fi
 
