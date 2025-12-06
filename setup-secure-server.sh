@@ -8,7 +8,7 @@
 #   - Enable kernel Livepatch via Ubuntu Pro (optional)
 #   - Enable security-only automatic updates
 #   - Configure monthly cron job for updates
-#   - Harden SSH config (custom port, root+password allowed)
+#   - Harden SSH config (move SSH to custom port ONLY, root+password allowed)
 #   - Install & configure Fail2Ban
 #   - Configure & enable UFW firewall (SSH ONLY on custom port)
 #   - Install ClamAV + Maldet
@@ -91,181 +91,62 @@ apt_install_retry() {
 require_root
 export DEBIAN_FRONTEND=noninteractive
 
-# ----------------- Ask for custom SSH port ----------------- #
+# ----------------- Custom SSH Port Setup ----------------- #
 
-echo "============================================================"
-echo " Please specify the custom SSH port you'd like to use."
-echo " The default is 22, but you can enter any valid port number."
-echo " Ensure that the chosen port is not in use and is not blocked."
-echo "============================================================"
-read -p "Enter SSH custom port (default: 22): " CUSTOM_SSH_PORT
-CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-22}"
+# Prompt user for custom SSH port (default is 22)
+read -r -p "Enter custom SSH port (default: 22): " SSH_PORT
+SSH_PORT="${SSH_PORT:-22}"
 
-log "Using SSH port: $CUSTOM_SSH_PORT"
+log "Using SSH port: $SSH_PORT"
 
-# ----------------- Ubuntu Pro / Livepatch (Optional) ----------------- #
-echo "============================================================"
-echo " Ubuntu Pro Livepatch Setup (Optional)"
-echo "============================================================"
-echo "Livepatch applies kernel security updates WITHOUT rebooting."
-echo "Requires an Ubuntu Pro token (not the old Livepatch token)."
-echo "Get one from: https://ubuntu.com/pro/subscribe"
-echo
-read -r -p "Enter your Ubuntu Pro token (leave blank to skip Livepatch): " UBUNTU_PRO_TOKEN
-echo
+# Backup the original sshd_config before making changes
+backup "/etc/ssh/sshd_config"
 
-if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
-  log "Setting up Ubuntu Pro + Livepatch..."
+# Replace all instances of Port 22 with the new custom port
+sed -i "s/^Port 22/Port $SSH_PORT/g" /etc/ssh/sshd_config
+sed -i "/^#Port $SSH_PORT/d" /etc/ssh/sshd_config  # Remove commented lines with old port if any
 
-  # Ensure 'pro' CLI is available
-  if ! command -v pro >/dev/null 2>&1; then
-    log "ubuntu-advantage-tools (pro CLI) missing — installing..."
-    if ! apt_install_retry ubuntu-advantage-tools; then
-      log "ERROR: ubuntu-advantage-tools install failed — cannot enable Livepatch."
-      UBUNTU_PRO_TOKEN=""
-    fi
-  fi
+# Apply the changes by restarting SSH
+log "Restarting SSH service to apply the new port..."
+systemctl restart sshd
 
-  if [[ -n "$UBUNTU_PRO_TOKEN" ]] && command -v pro >/dev/null 2>&1; then
-    # Attach if needed (pro status exits 0 even when not attached, so check text)
-    if pro status 2>&1 | grep -qi "not attached"; then
-      log "Machine is NOT attached to Ubuntu Pro — attaching now..."
-      if pro attach "$UBUNTU_PRO_TOKEN"; then
-        log "Ubuntu Pro attached successfully."
-      else
-        log "WARNING: 'pro attach' failed — Livepatch may not be available."
-      fi
-    else
-      log "Ubuntu Pro already attached; skipping 'pro attach'."
-    fi
+# ----------------- UFW Firewall Configuration ----------------- #
 
-    # Helper: check if Livepatch is reported enabled
-    is_livepatch_enabled() {
-      pro status 2>/dev/null | awk '/livepatch/ {print tolower($0)}' | grep -q 'enabled'
-    }
+log "Configuring UFW firewall to allow the new SSH port..."
 
-    # If already enabled, don't even try to enable again
-    if is_livepatch_enabled; then
-      log "Livepatch already enabled via Ubuntu Pro."
-      STEP_livepatch="OK"
-    else
-      log "Enabling Livepatch via 'pro enable livepatch' (ignore errors if already enabled)..."
-      # Do NOT trust the exit code; some versions return non-zero even when it works
-      pro enable livepatch >/tmp/pro-livepatch.log 2>&1 || true
+# Allow the custom SSH port
+ufw allow "$SSH_PORT"/tcp
 
-      if is_livepatch_enabled; then
-        log "Livepatch enabled (or already enabled) according to 'pro status'."
-        STEP_livepatch="OK"
-      else
-        log "WARNING: Livepatch still not reported as enabled after 'pro enable livepatch'."
-        log "         See /tmp/pro-livepatch.log for details."
-        STEP_livepatch="FAILED"
-      fi
-    fi
-  fi
+# Reload UFW to apply the changes
+ufw reload
+
+# ----------------- Fail2Ban Configuration ----------------- #
+
+log "Configuring Fail2Ban to use the new SSH port..."
+
+# Backup Fail2Ban config before making changes
+backup "/etc/fail2ban/jail.local"
+
+# Modify the port in Fail2Ban configuration
+sed -i "s/^port     = ssh/port     = $SSH_PORT/" /etc/fail2ban/jail.local
+
+# Restart Fail2Ban service to apply changes
+systemctl restart fail2ban
+
+# ----------------- Check SSH Connectivity ----------------- #
+
+log "Verifying SSH connectivity on port $SSH_PORT..."
+
+# Test SSH connectivity using the custom port
+if nc -zv 127.0.0.1 "$SSH_PORT"; then
+  log "[OK] SSH is reachable on port $SSH_PORT."
 else
-  log "Livepatch skipped."
-fi
-
-# ----------------- Repair dpkg / APT ----------------- #
-
-log "Checking dpkg / APT health..."
-
-if dpkg --audit | grep -q .; then
-  log "dpkg broken — repairing..."
-  dpkg --configure -a || log "WARNING: dpkg configure did not finish cleanly."
-fi
-
-apt-get -f install -y || true
-
-log "Running apt-get update..."
-apt_update_retry || log "ERROR: apt-get update failed."
-
-log "Checking required base packages (lsb-release, ufw, fail2ban, etc.)..."
-
-BASE_PKGS=(lsb-release ca-certificates openssh-server cron ufw fail2ban unattended-upgrades curl wget tar)
-NEED_INSTALL=()
-
-for pkg in "${BASE_PKGS[@]}"; do
-  if dpkg -s "$pkg" >/dev/null 2>&1; then
-    continue
-  else
-    NEED_INSTALL+=("$pkg")
-  fi
-done
-
-if ((${#NEED_INSTALL[@]} > 0)); then
-  log "Installing required base packages: ${NEED_INSTALL[*]}"
-  if apt_install_retry "${NEED_INSTALL[@]}"; then
-    STEP_update_base_packages="OK"
-  else
-    log "ERROR: Failed to install some base packages."
-  fi
-else
-  log "All required base packages already installed; skipping apt-get install."
-  STEP_update_base_packages="OK"
-fi
-
-# ----------------- SSH Hardening ----------------- #
-
-SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
-mkdir -p /etc/ssh/sshd_config.d
-backup "$SSH_HARDEN"
-
-log "Applying SSH hardening (SSH on port $CUSTOM_SSH_PORT only, root+password allowed)..."
-
-# Overwrite existing Port line in sshd_config
-sudo sed -i "s/^Port [0-9]\+/Port $CUSTOM_SSH_PORT/" /etc/ssh/sshd_config
-sudo systemctl restart sshd
-
-# ----------------- UFW Firewall ----------------- #
-log "Configuring UFW firewall to allow port $CUSTOM_SSH_PORT..."
-
-# Allow the custom SSH port in UFW
-sudo ufw allow $CUSTOM_SSH_PORT/tcp
-sudo ufw allow $CUSTOM_SSH_PORT/tcp comment "Custom SSH Port" >/dev/null
-sudo ufw reload
-
-# ----------------- Fail2Ban ----------------- #
-log "Configuring Fail2Ban for custom SSH port $CUSTOM_SSH_PORT..."
-
-# Modify Fail2Ban config to use the custom port
-sudo sed -i "s/^port = ssh/port = $CUSTOM_SSH_PORT/" /etc/fail2ban/jail.local
-sudo systemctl restart fail2ban
-
-# ----------------- Verify SSH Connectivity ----------------- #
-
-log "Verifying SSH connectivity on port $CUSTOM_SSH_PORT..."
-
-# Best-effort guess of primary server IP (for info only)
-SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
-if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
-  SERVER_IP_GUESS="127.0.0.1"
-fi
-
-read -r -p "Enter server IP/hostname to test TCP on port $CUSTOM_SSH_PORT [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
-SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
-
-# Try to ensure we have a TCP testing tool
-TCP_TEST_OK=0
-
-if command -v nc >/dev/null 2>&1; then
-  if nc -zw5 "$SSH_TEST_HOST" "$CUSTOM_SSH_PORT" >/dev/null 2>&1; then
-    log "[OK] TCP connection to ${SSH_TEST_HOST}:${CUSTOM_SSH_PORT} succeeded (port is open)."
-    TCP_TEST_OK=1
-  else
-    log "[-] WARNING: TCP connection to ${SSH_TEST_HOST}:${CUSTOM_SSH_PORT} FAILED."
-    log "    Check that sshd is listening on port $CUSTOM_SSH_PORT and that UFW allows it."
-  fi
-else
-  log "[-] WARNING: netcat (nc) not found; skipping connectivity test."
-fi
-
-if [[ "$TCP_TEST_OK" -eq 1 ]]; then
-  log "[INFO] SSH on port $CUSTOM_SSH_PORT appears reachable."
-else
-  log "[INFO] Please verify SSH access from your own machine before closing this session."
+  log "[ERROR] SSH is NOT reachable on port $SSH_PORT. Please check your configuration."
 fi
 
 # ----------------- Final Steps ----------------- #
-log "Setup complete. Please verify SSH access on port $CUSTOM_SSH_PORT."
+
+log "Secure Server Setup complete. Please verify SSH access using port $SSH_PORT."
+log "If you are unable to connect, please verify firewall and SSH configuration."
+
+exit 0
