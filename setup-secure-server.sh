@@ -8,7 +8,7 @@
 #   - Enable kernel Livepatch via Ubuntu Pro (optional)
 #   - Enable security-only automatic updates
 #   - Configure monthly cron job for updates
-#   - Harden SSH config (move SSH to port 2808 ONLY, root+password allowed)
+#   - Harden SSH config (move SSH to port, root+password allowed)
 #   - Install & configure Fail2Ban
 #   - Configure & enable UFW firewall (SSH ONLY on 2808, not 22)
 #   - Install ClamAV + Maldet
