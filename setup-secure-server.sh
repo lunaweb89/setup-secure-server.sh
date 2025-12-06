@@ -8,9 +8,9 @@
 #   - Enable kernel Livepatch via Ubuntu Pro (optional)
 #   - Enable security-only automatic updates
 #   - Configure monthly cron job for updates
-#   - Harden SSH config (root login allowed, custom SSH port)
+#   - Harden SSH config (move SSH to port 2808 ONLY, root+password allowed)
 #   - Install & configure Fail2Ban
-#   - Configure & enable UFW firewall
+#   - Configure & enable UFW firewall (SSH ONLY on 2808, not 22)
 #   - Install ClamAV + Maldet
 #   - Create weekly malware scan cron job
 #
@@ -19,10 +19,6 @@
 
 set -u   # strict on unset vars
 set -o pipefail
-
-# ----------------- Configurable SSH Port ----------------- #
-# Single custom SSH port used everywhere (SSH, UFW, Fail2Ban)
-SSH_PORT=2808
 
 # ----------------- Step Status ----------------- #
 STEP_update_base_packages="FAILED"
@@ -35,8 +31,6 @@ STEP_clamav_install="FAILED"
 STEP_maldet_install="FAILED"
 STEP_weekly_malware_cron="FAILED"
 STEP_initial_unattended_upgrade="FAILED"
-
-SSH_CONFIG_OK=0   # internal flag: SSH config validated but not yet reloaded
 
 # ----------------- Helpers ----------------- #
 
@@ -121,7 +115,7 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
   fi
 
   if [[ -n "$UBUNTU_PRO_TOKEN" ]] && command -v pro >/dev/null 2>&1; then
-    # Attach if needed
+    # Attach if needed (pro status exits 0 even when not attached, so check text)
     if pro status 2>&1 | grep -qi "not attached"; then
       log "Machine is NOT attached to Ubuntu Pro — attaching now..."
       if pro attach "$UBUNTU_PRO_TOKEN"; then
@@ -133,15 +127,18 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
       log "Ubuntu Pro already attached; skipping 'pro attach'."
     fi
 
+    # Helper: check if Livepatch is reported enabled
     is_livepatch_enabled() {
       pro status 2>/dev/null | awk '/livepatch/ {print tolower($0)}' | grep -q 'enabled'
     }
 
+    # If already enabled, don't even try to enable again
     if is_livepatch_enabled; then
       log "Livepatch already enabled via Ubuntu Pro."
       STEP_livepatch="OK"
     else
       log "Enabling Livepatch via 'pro enable livepatch' (ignore errors if already enabled)..."
+      # Do NOT trust the exit code; some versions return non-zero even when it works
       pro enable livepatch >/tmp/pro-livepatch.log 2>&1 || true
 
       if is_livepatch_enabled; then
@@ -231,17 +228,19 @@ EOF
   STEP_auto_security_updates="OK"
 } || log "ERROR: Failed to configure unattended-upgrades."
 
-# ----------------- SSH Hardening (config only, reload later) ----------------- #
+# ----------------- SSH Hardening (port 2808 only) ----------------- #
 
 SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
 mkdir -p /etc/ssh/sshd_config.d
 backup "$SSH_HARDEN"
 
-log "Applying SSH hardening (port ${SSH_PORT}, root+password allowed)..."
+log "Applying SSH hardening (SSH on port 2808 only, root+password allowed)..."
 
-if cat > "$SSH_HARDEN" <<EOF
+SSH_CONFIG_OK=0
+
+if cat > "$SSH_HARDEN" <<'EOF'
 # SSH Hardening
-Port ${SSH_PORT}
+Port 2808
 Protocol 2
 PermitRootLogin yes
 PasswordAuthentication yes
@@ -261,10 +260,12 @@ then
     log "SSH configuration syntax OK. Reload will be done AFTER firewall check."
     SSH_CONFIG_OK=1
   else
-    log "ERROR: SSH config test (sshd -t) failed. Not reloading sshd."
-    SSH_CONFIG_OK=0
+    log "ERROR: SSH config test failed. Not reloading sshd."
   fi
 fi
+
+# NOTE: We set STEP_ssh_hardening to OK only AFTER sshd is reloaded safely
+# once UFW is confirmed to allow port 2808.
 
 # ----------------- Fail2Ban ----------------- #
 
@@ -274,7 +275,7 @@ backup "$FAIL_JAIL"
 
 log "Configuring Fail2Ban..."
 
-if cat > "$FAIL_JAIL" <<EOF
+if cat > "$FAIL_JAIL" <<'EOF'
 [DEFAULT]
 bantime  = 1h
 findtime = 10m
@@ -282,7 +283,7 @@ maxretry = 5
 
 [sshd]
 enabled  = true
-port     = ${SSH_PORT}
+port     = 2808
 logpath  = %(sshd_log)s
 backend  = systemd
 EOF
@@ -298,84 +299,69 @@ log "Configuring UFW firewall..."
 
 UFW_OK=1
 
-# SSH port (custom only, no port 22)
-ufw allow "${SSH_PORT}/tcp"    >/dev/null || UFW_OK=0
-ufw limit "${SSH_PORT}/tcp"    >/dev/null || true
+# Remove any existing OpenSSH / 22 rules so SSH is ONLY on 2808
+ufw delete allow OpenSSH  >/dev/null 2>&1 || true
+ufw delete limit OpenSSH  >/dev/null 2>&1 || true
+ufw delete allow 22/tcp   >/dev/null 2>&1 || true
+ufw delete limit 22/tcp   >/dev/null 2>&1 || true
+
+# SSH custom port (2808) with rate-limiting
+ufw limit 2808/tcp        >/dev/null || UFW_OK=0
 
 # HTTP/HTTPS
-ufw allow 80/tcp    >/dev/null || UFW_OK=0
-ufw allow 443/tcp   >/dev/null || UFW_OK=0
+ufw allow 80/tcp          >/dev/null || UFW_OK=0
+ufw allow 443/tcp         >/dev/null || UFW_OK=0
 
 # App ports
-ufw allow 8090/tcp  >/dev/null || UFW_OK=0
-ufw allow 7080/tcp  >/dev/null || UFW_OK=0
+ufw allow 8090/tcp        >/dev/null || UFW_OK=0
+ufw allow 7080/tcp        >/dev/null || UFW_OK=0
 
 # DNS
-ufw allow 53/tcp    >/dev/null || UFW_OK=0
-ufw allow 53/udp    >/dev/null || UFW_OK=0
-ufw allow out 53/tcp >/dev/null || UFW_OK=0
-ufw allow out 53/udp >/dev/null || UFW_OK=0
+ufw allow 53/tcp          >/dev/null || UFW_OK=0
+ufw allow 53/udp          >/dev/null || UFW_OK=0
+ufw allow out 53/tcp      >/dev/null || UFW_OK=0
+ufw allow out 53/udp      >/dev/null || UFW_OK=0
 
 # Email ports
-ufw allow 25/tcp    >/dev/null || UFW_OK=0
-ufw allow 465/tcp   >/dev/null || UFW_OK=0
-ufw allow 587/tcp   >/dev/null || UFW_OK=0
-ufw allow 110/tcp   >/dev/null || UFW_OK=0
-ufw allow 995/tcp   >/dev/null || UFW_OK=0
-ufw allow 143/tcp   >/dev/null || UFW_OK=0
-ufw allow 993/tcp   >/dev/null || UFW_OK=0
+ufw allow 25/tcp          >/dev/null || UFW_OK=0
+ufw allow 465/tcp         >/dev/null || UFW_OK=0
+ufw allow 587/tcp         >/dev/null || UFW_OK=0
+ufw allow 110/tcp         >/dev/null || UFW_OK=0
+ufw allow 995/tcp         >/dev/null || UFW_OK=0
+ufw allow 143/tcp         >/dev/null || UFW_OK=0
+ufw allow 993/tcp         >/dev/null || UFW_OK=0
 
 # FTP
 ufw allow 21/tcp          >/dev/null || UFW_OK=0
 ufw allow 40110:40210/tcp >/dev/null || UFW_OK=0
 
 # Livepatch + Snapd traffic (HTTPS out)
-ufw allow out 443/tcp >/dev/null || UFW_OK=0
+ufw allow out 443/tcp     >/dev/null || UFW_OK=0
 
 ufw default deny incoming  >/dev/null || UFW_OK=0
 ufw default allow outgoing >/dev/null || UFW_OK=0
 
 ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
 
-# ----------------- SSH Pre-Check + Safe Reload ----------------- #
+# ---- Pre-check: ensure 2808 is allowed/limited before reloading SSH ---- #
 
-# ----------------- SSH Pre-Check + Safe Reload ----------------- #
+if [[ "$SSH_CONFIG_OK" -eq 1 ]]; then
+  log "[Pre-check] Ensuring firewall allows SSH port 2808 before reloading sshd..."
 
-log "Pre-check: ensuring firewall allows SSH port ${SSH_PORT} before reloading sshd..."
-
-FIREWALL_ALLOWS_SSH=0
-UFW_STATUS="$(ufw status 2>/dev/null || true)"
-
-if echo "$UFW_STATUS" | grep -q "Status: active"; then
-  # Match lines like:
-  #   2808/tcp                  ALLOW       Anywhere
-  #   2808                      ALLOW       Anywhere
-  if echo "$UFW_STATUS" | grep -E "^[[:space:]]*${SSH_PORT}(/tcp)?[[:space:]]+ALLOW" >/dev/null; then
-    FIREWALL_ALLOWS_SSH=1
-  fi
-else
-  # If UFW is not active, we do NOT auto-reload SSH
-  FIREWALL_ALLOWS_SSH=0
-fi
-
-if [[ "$SSH_CONFIG_OK" -eq 1 && "$FIREWALL_ALLOWS_SSH" -eq 1 ]]; then
-  log "Firewall appears to allow port ${SSH_PORT}/tcp. Reloading sshd to apply new port..."
-  if systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1; then
-    STEP_ssh_hardening="OK"
-    log "SSH is now configured to use ONLY port ${SSH_PORT}. Port 22 is not opened by this script."
-    log "Use: ssh -p ${SSH_PORT} root@YOUR_SERVER_IP"
+  if ufw status | grep -E '2808/tcp' | grep -E 'ALLOW|LIMIT' >/dev/null 2>&1; then
+    if systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1; then
+      log "SSH reloaded successfully. SSH now listens ONLY on port 2808."
+      STEP_ssh_hardening="OK"
+    else
+      log "WARNING: Failed to reload sshd. Check 'systemctl status ssh' and logs."
+    fi
   else
-    log "ERROR: Failed to reload sshd. SSH is still using the old configuration."
+    log "[WARNING] UFW does not show an ALLOW/LIMIT rule for 2808/tcp."
+    log "[WARNING] Not reloading sshd to avoid locking you out."
+    log "[INFO] After fixing firewall, run: systemctl reload ssh"
   fi
 else
-  log "WARNING: Skipping SSH reload because either:"
-  log "  - SSH config did not validate, or"
-  log "  - UFW does NOT clearly show an ALLOW rule for port ${SSH_PORT}/tcp."
-  log "SSH is still running with its previous port configuration."
-  log "Check:"
-  log "  - /etc/ssh/sshd_config.d/99-hardening.conf"
-  log "  - 'ufw status' for port ${SSH_PORT}"
-  log "Then manually run: systemctl reload ssh"
+  log "[WARNING] SSH hardening not fully applied because sshd -t failed earlier."
 fi
 
 # ----------------- ClamAV ----------------- #
@@ -468,6 +454,49 @@ echo "[INFO] Logs:"
 echo " - /var/log/auto-security-updates.log"
 echo " - /var/log/weekly-malware-scan.log"
 echo
+
+# ----------------- SSH Connectivity Test (Port 2808) ----------------- #
+
+# Make sure ssh client exists (usually already installed)
+if ! command -v ssh >/dev/null 2>&1; then
+  log "ssh client not found — installing openssh-client..."
+  apt_install_retry openssh-client || log "WARNING: Failed to install openssh-client; SSH test may not run."
+fi
+
+if command -v ssh >/dev/null 2>&1; then
+  echo "================ SSH Connectivity Test (port 2808) ================"
+  # Best-effort guess of primary server IP
+  SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
+    SERVER_IP_GUESS="127.0.0.1"
+  fi
+
+  read -r -p "Enter server IP/hostname to test SSH on port 2808 [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
+  SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
+
+  echo
+  echo "[INFO] The script will now start a TEST SSH session:"
+  echo "       ssh -p 2808 root@${SSH_TEST_HOST}"
+  echo "       Log in with your ROOT password, verify it works, then type 'exit'"
+  echo "       to return to this setup script."
+  read -r -p "Press ENTER to start the SSH test..." _
+
+  ssh -p 2808 "root@${SSH_TEST_HOST}"
+  SSH_TEST_RC=$?
+
+  if [[ "$SSH_TEST_RC" -eq 0 ]]; then
+    echo "[OK] SSH test session to root@${SSH_TEST_HOST}:2808 completed successfully."
+    echo "     You should now be safe to reconnect on port 2808 after a reboot."
+  else
+    echo "[-] WARNING: SSH test to root@${SSH_TEST_HOST}:2808 failed or was aborted (exit code: $SSH_TEST_RC)."
+    echo "    Do NOT close your current SSH session until you have fixed SSH/Firewall settings."
+  fi
+
+  echo "=================================================================="
+  echo
+else
+  echo "[-] WARNING: ssh client is not available; skipping SSH connectivity test."
+fi
 
 # -------------------------------------------------------------
 # Optional: Run external backup module (GitHub-hosted)
