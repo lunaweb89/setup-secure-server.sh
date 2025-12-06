@@ -33,8 +33,9 @@ STEP_weekly_malware_cron="FAILED"
 STEP_initial_unattended_upgrade="FAILED"
 
 # ----------------- Custom Port Configuration ----------------- #
-# Define custom SSH port here (e.g., 2808)
-CUSTOM_SSH_PORT="2808"  # Change this line to set a custom SSH port
+# Prompt the user to enter the custom SSH port before applying hardening
+read -r -p "Enter custom SSH port (e.g., 2808) [2808]: " CUSTOM_SSH_PORT
+CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-2808}"
 LOGGED_PORT="Custom port"  # Masked output for SSH port
 
 # ----------------- Helpers ----------------- #
