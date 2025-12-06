@@ -366,31 +366,45 @@ ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
 
 log "Configuring Firewalld..."
 
-FIREWALL_OK=1
+FIREWALLD_SERVICE="/etc/firewalld/services/SSHCustom.xml"
+FIREWALLD_ZONE="/etc/firewalld/zones/public.xml"
 
-# Add the custom SSH port to firewalld under SSHCustom
-# We add the custom port to the Firewalld service named SSHCustom.
-sudo firewall-cmd --zone=public --add-port=$CUSTOM_SSH_PORT/tcp --permanent >/dev/null || FIREWALL_OK=0
+# Backup existing files
+backup "$FIREWALLD_SERVICE"
+backup "$FIREWALLD_ZONE"
 
-# Ensure the SSHCustom service exists in firewalld for the custom SSH port
-# Check if the custom SSH service exists
-if ! sudo firewall-cmd --list-services | grep -q "SSHCustom"; then
-  log "Creating SSHCustom service for port $CUSTOM_SSH_PORT in Firewalld..."
-  
-  # Define the custom SSH service in firewalld (if it doesn't exist already)
-  sudo firewall-cmd --permanent --new-service=SSHCustom
-  sudo firewall-cmd --permanent --service=SSHCustom --add-port=$CUSTOM_SSH_PORT/tcp
+# Create or update the SSHCustom.xml service for custom SSH port
+cat > "$FIREWALLD_SERVICE" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <port port="$CUSTOM_SSH_PORT" protocol="tcp"/>
+</service>
+EOF
 
-  # Reload firewalld to apply changes
-  sudo firewall-cmd --reload >/dev/null && log "Firewalld reloaded successfully with SSHCustom service."
+# Update the public zone to allow the custom SSH port
+if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
+  # Adding custom port rule to the public zone
+  sed -i "/<\/zone>/i \  <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"\/>" "$FIREWALLD_ZONE"
+  firewall-cmd --reload
+  log "Custom port $CUSTOM_SSH_PORT added to Firewalld public zone."
 else
-  log "SSHCustom service already exists in Firewalld."
+  log "Custom port $CUSTOM_SSH_PORT already present in the Firewalld public zone."
 fi
 
-if [[ "$FIREWALL_OK" -eq 1 ]]; then
-  log "Custom port $CUSTOM_SSH_PORT added to Firewalld successfully under SSHCustom."
+# Reload firewalld to apply changes to SSHCustom service
+firewall-cmd --reload
+
+# Add the custom port permanently
+firewall-cmd --zone=public --add-port=$CUSTOM_SSH_PORT/tcp --permanent
+
+# Reload firewalld to apply the new port configuration
+firewall-cmd --reload
+
+# Check if the new custom SSH port is active in firewalld
+if firewall-cmd --list-ports | grep -q "$CUSTOM_SSH_PORT/tcp"; then
+  log "Custom SSH port $CUSTOM_SSH_PORT added to Firewalld successfully."
 else
-  log "Failed to add custom port $CUSTOM_SSH_PORT to Firewalld under SSHCustom."
+  log "Failed to add custom SSH port $CUSTOM_SSH_PORT to Firewalld."
 fi
 
 # ----------------- ClamAV ----------------- #
