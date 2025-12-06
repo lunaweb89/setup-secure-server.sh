@@ -231,7 +231,7 @@ EOF
 # ----------------- ClamAV ----------------- #
 
 log "Checking if ClamAV is installed..."
-if ! command -v clamd >/dev/null 2>&1 && ! command -v freshclam >/dev/null 2>&1; then
+if ! dpkg -l | grep -q clamav; then
   log "ClamAV not installed, installing..."
   if apt_install_retry clamav clamav-daemon; then
     systemctl stop clamav-freshclam >/dev/null 2>&1 || true
@@ -248,7 +248,7 @@ fi
 # ----------------- Maldet ----------------- #
 
 log "Checking if Maldet is installed..."
-if ! command -v maldet >/dev/null 2>&1; then
+if ! dpkg -l | grep -q maldet; then
   log "Maldet not installed, installing..."
   TMP_DIR="/tmp/maldet-install"
   mkdir -p "$TMP_DIR"
