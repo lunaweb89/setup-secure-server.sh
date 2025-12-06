@@ -287,6 +287,22 @@ fi
 # NOTE: We set STEP_ssh_hardening to OK only AFTER sshd is reloaded safely
 # once UFW is confirmed to allow port 2808.
 
+# ----------------- Update SSH Configuration ----------------- #
+
+# Update /etc/ssh/sshd_config to uncomment PasswordAuthentication yes
+SSH_CONFIG_FILE="/etc/ssh/sshd_config"
+
+echo "Ensuring PasswordAuthentication is enabled and Port is correct..."
+
+# Uncomment PasswordAuthentication yes and set Port to 2808
+sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' "$SSH_CONFIG_FILE"
+sudo sed -i 's/^Port .*/Port 2808/' "$SSH_CONFIG_FILE"
+
+# Reload SSH service to apply changes
+sudo systemctl reload sshd
+
+echo "[INFO] SSH configuration updated successfully."
+
 # ----------------- Fail2Ban ----------------- #
 
 FAIL_JAIL="/etc/fail2ban/jail.local"
@@ -532,9 +548,8 @@ fi
 if [[ "$TCP_TEST_OK" -eq 1 ]]; then
   echo "[INFO] Attempting SSH login on port 2808..."
 
-  # Attempt SSH login with user input for username (default root)
-  read -r -p "Enter the username for SSH login (default: root): " SSH_USER
-  SSH_USER="${SSH_USER:-root}"
+  # Set the default username as root (no prompt needed)
+  SSH_USER="root"
 
   # Prompt for SSH password for the specified user
   read -s -r -p "Enter SSH password for $SSH_USER@$SSH_TEST_HOST: " SSH_PASSWORD
