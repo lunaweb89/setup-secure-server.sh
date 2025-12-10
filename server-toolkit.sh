@@ -3,10 +3,11 @@
 # server-toolkit.sh
 #
 # Simple menu wrapper for:
-#   - setup-secure-server.sh      (full hardening)
-#   - setup-backup-module.sh      (backup + storage box)
-#   - restore-backup.sh           (disaster recovery)
-#   - server-optimizer.sh         (performance tuning)
+#   - setup-secure-server.sh          (full hardening)
+#   - setup-backup-module.sh          (backup + storage box)
+#   - restore-backup.sh               (disaster recovery)
+#   - server-optimizer.sh             (performance tuning)
+#   - server-optimizer-rollback.sh    (rollback optimizer changes)
 #
 
 set -euo pipefail
@@ -35,6 +36,11 @@ run_optimizer_only() {
   bash <(curl -fsSL "${BASE_URL}/server-optimizer.sh")
 }
 
+run_optimizer_rollback() {
+  log "Starting performance optimizer rollback..."
+  bash <(curl -fsSL "${BASE_URL}/server-optimizer-rollback.sh")
+}
+
 show_status() {
   echo "============================================================"
   echo "                 LunaServers – Status"
@@ -45,7 +51,8 @@ show_status() {
     /root/.secure_server_setup_done \
     /root/.backup_module_setup_done \
     /root/.restore_module_last_run \
-    /root/.server_optimizer_last_run
+    /root/.server_optimizer_last_run \
+    /root/.server_optimizer_rollback_last_run
   do
     if [[ -f "$f" ]]; then
       echo "  [OK]  Marker present: $f"
@@ -105,22 +112,27 @@ while :; do
      - Auto-tunes sysctl, limits, OpenLiteSpeed, PHP LSAPI
      - Auto-tunes MariaDB (60% RAM) & Redis (15% RAM, capped at 2GB)
 
-  5) View Status
+  5) Run Performance Optimizer Rollback
+     - Runs server-optimizer-rollback.sh
+     - Restores last known-good configs for sysctl, OLS, PHP, MariaDB, Redis
+
+  6) View Status
      - Shows markers, Borg repo & connectivity, cronjob presence
 
-  6) Exit Toolkit
+  7) Exit Toolkit
 ============================================================
 MENU
 
-  read -r -p "Select an option [1-6]: " choice
+  read -r -p "Select an option [1-7]: " choice
 
   case "$choice" in
     1) run_full_secure_setup ;;
     2) run_backup_setup_only ;;
     3) run_restore_module_only ;;
     4) run_optimizer_only ;;
-    5) show_status ;;
-    6) exit 0 ;;
-    *) echo "Invalid choice. Please enter 1–6." ;;
+    5) run_optimizer_rollback ;;
+    6) show_status ;;
+    7) exit 0 ;;
+    *) echo "Invalid choice. Please enter 1–7." ;;
   esac
 done
