@@ -118,4 +118,7 @@ if systemctl status lsws >/dev/null 2>&1; then
   systemctl restart lsws || warn "OpenLiteSpeed restart failed; please check logs."
 fi
 
+touch /root/.server_optimizer_rollback_last_run 2>/dev/null || true
+
+
 log "Rollback completed. Please test your sites & services."
