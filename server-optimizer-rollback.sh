@@ -96,7 +96,7 @@ fi
 
 if [[ -f /etc/security/limits.conf ]]; then
   warn "NOTE: /etc/security/limits.conf was overwritten by server-optimizer.sh"
-  warn "      No backup was created by default. If you have your own"
+  warn "      No automatic backup was created by default. If you have your own"
   warn "      backup, restore it manually and then re-login."
 fi
 
@@ -119,6 +119,5 @@ if systemctl status lsws >/dev/null 2>&1; then
 fi
 
 touch /root/.server_optimizer_rollback_last_run 2>/dev/null || true
-
 
 log "Rollback completed. Please test your sites & services."
