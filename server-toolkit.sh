@@ -1,68 +1,112 @@
 #!/usr/bin/env bash
-
-# Server Toolkit Menu
 #
-# This menu provides easy access to the various server setup, backup, and restore functions.
-# You can also view the status of your server's security setup, backups, and SSH configuration.
+# server-toolkit.sh
+#
+# Simple menu wrapper for:
+#   - setup-secure-server.sh      (full hardening)
+#   - setup-backup-module.sh      (backup + storage box)
+#   - restore-backup.sh           (disaster recovery)
+#
 
-clear
-echo "============================================================"
-echo "              LunaServers – Server Toolkit Menu             "
-echo "============================================================"
-echo ""
-echo "  1) Full Secure Server Setup"
-echo "     - Runs setup-secure-server.sh"
-echo "     - Hardens SSH (custom port), UFW, Fail2Ban"
-echo "     - Sets up auto security updates, ClamAV, Maldet"
-echo "     - Optionally runs Backup + Storage Box module from inside"
-echo "     [STATUS] Already run at least once (marker present)"
-echo ""
-echo "  2) Run Auto Backup Setup Only"
-echo "     - Runs setup-backup-module.sh for automated backup"
-echo "     - Sets up Borg + Hetzner Storage Box backups"
-echo "     - Creates daily backup cronjob and helper scripts"
-echo ""
-echo "  3) Run Restore Module Only"
-echo "     - Runs restore-backup.sh"
-echo "     - Restores selected sites from Borg backups"
-echo "     - For disaster recovery / migrations"
-echo "     NOTE: Running this repeatedly will NOT 'break' the OS,"
-echo "           but CAN overwrite site files/databases each time."
-echo ""
-echo "  4) View Status"
-echo "     - Shows markers, Borg repo & connectivity, cronjob presence"
-echo ""
-echo "  5) Exit Toolkit"
-echo "============================================================"
-echo ""
-read -p "Select an option [1-5]: " choice
+set -euo pipefail
 
-case "$choice" in
-  1) 
-    # Full Secure Server Setup
-    bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-secure-server.sh)
-    ;;
-  2) 
-    # Auto Backup Module
-    bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-backup-module.sh)
-    ;;
-  3) 
-    # Restore Backup Module
-    bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/restore-backup.sh)
-    ;;
-  4) 
-    # View Status
-    echo "============================================================"
-    echo "                    Viewing Server Status                  "
-    echo "============================================================"
-    # Call status-checking functions (or a script that handles this)
-    bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/status-check.sh)
-    ;;
-  5) 
-    echo "Exiting toolkit. Bye."
-    exit 0
-    ;;
-  *)
-    echo "Invalid option. Please choose between 1-5."
-    ;;
-esac
+BASE_URL="https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main"
+
+log() { echo "[+] $*"; }
+
+run_full_secure_setup() {
+  log "Starting full secure server setup..."
+  bash <(curl -fsSL "${BASE_URL}/setup-secure-server.sh")
+}
+
+run_backup_setup_only() {
+  log "Starting backup module setup..."
+  bash <(curl -fsSL "${BASE_URL}/setup-backup-module.sh")
+}
+
+run_restore_module_only() {
+  log "Starting restore module..."
+  bash <(curl -fsSL "${BASE_URL}/restore-backup.sh")
+}
+
+show_status() {
+  echo "============================================================"
+  echo "                 LunaServers – Status"
+  echo "============================================================"
+
+  # Markers (optional – adapt if you use different marker files)
+  for f in \
+    /root/.secure_server_setup_done \
+    /root/.backup_module_setup_done \
+    /root/.restore_module_last_run
+  do
+    if [[ -f "$f" ]]; then
+      echo "  [OK]  Marker present: $f"
+    else
+      echo "  [--]  Marker missing: $f"
+    fi
+  done
+
+  echo
+  echo "UFW status (if installed):"
+  if command -v ufw >/dev/null 2>&1; then
+    ufw status verbose || true
+  else
+    echo "  UFW not installed."
+  fi
+
+  echo
+  echo "Fail2Ban status (if installed):"
+  if systemctl list-unit-files | grep -q '^fail2ban\.service'; then
+    systemctl status fail2ban --no-pager || true
+  else
+    echo "  Fail2Ban not installed."
+  fi
+
+  echo
+  read -r -p "Press ENTER to return to menu..." _
+}
+
+while :; do
+  cat <<'MENU'
+
+============================================================
+              LunaServers – Server Toolkit Menu
+============================================================
+
+  1) Full Secure Server Setup
+     - Runs setup-secure-server.sh
+     - Hardens SSH (custom port), UFW, Fail2Ban
+     - Sets up auto security updates, ClamAV, Maldet
+     - Optionally runs Backup + Storage Box module from inside
+
+  2) Run Auto Backup Setup Only
+     - Runs setup-backup-module.sh for automated backup
+     - Sets up Borg + Hetzner Storage Box backups
+     - Creates daily backup cronjob and helper scripts
+
+  3) Run Restore Module Only
+     - Runs restore-backup.sh
+     - Restores selected sites from Borg backups
+     - For disaster recovery / migrations
+     NOTE: Running this repeatedly will NOT 'break' the OS,
+           but CAN overwrite site files/databases each time.
+
+  4) View Status
+     - Shows markers, Borg repo & connectivity, cronjob presence
+
+  5) Exit Toolkit
+============================================================
+MENU
+
+  read -r -p "Select an option [1-5]: " choice
+
+  case "$choice" in
+    1) run_full_secure_setup ;;
+    2) run_backup_setup_only ;;
+    3) run_restore_module_only ;;
+    4) show_status ;;
+    5) exit 0 ;;
+    *) echo "Invalid choice. Please enter 1–5." ;;
+  esac
+done
