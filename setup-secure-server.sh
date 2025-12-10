@@ -265,11 +265,25 @@ APT::Periodic::Update-Package-Lists "7";
 APT::Periodic::Unattended-Upgrade "7";
 EOF
 
-  # Monthly updates on 1st at 13:30 (cron in system time)
+  # Monthly maintenance on 1st at 13:30–13:55 (cron in system time)
   cat > "$CRON_UPDATES" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# 1) Run unattended security upgrades
 30 13 1 * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
+
+# 2) Clean up unused packages
+40 13 1 * * root apt-get autoremove -y >> /var/log/auto-security-updates.log 2>&1
+
+# 3) Clean APT cache (remove obsolete debs)
+45 13 1 * * root apt-get autoclean -y >> /var/log/auto-security-updates.log 2>&1
+
+# 4) Extra cache cleanup
+50 13 1 * * root apt-get clean >> /var/log/auto-security-updates.log 2>&1
+
+# 5) Prune systemd journals to max 200M to avoid log bloat
+55 13 1 * * root journalctl --vacuum-size=200M >> /var/log/auto-security-updates.log 2>&1
 EOF
 
   chmod 644 "$CRON_UPDATES"
