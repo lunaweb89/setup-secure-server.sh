@@ -251,3 +251,6 @@ echo "System failed services:"
 systemctl --failed || true
 
 log "Server optimization finished successfully."
+
+touch /root/.server_optimizer_last_run 2>/dev/null || true
+
